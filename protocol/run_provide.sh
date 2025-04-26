@@ -1,0 +1,1 @@
+docker run --network="development" -v ./target/debug/examples:/app/examples ubuntu:22.04 /app/examples/sd_provide

@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+  provider:
+    image: ubuntu:22.04
+    volumes:
+      - ./target/debug/examples:/app/examples
+    command: /app/examples/sd_provide
+    networks:
+      - development
+    restart: unless-stopped
+    
+  discover:
+    image: ubuntu:22.04
+    volumes:
+      - ./target/debug/examples:/app/examples
+    command: /app/examples/sd_discover
+    networks:
+      - development
+    depends_on:
+      - provider
+
+networks:
+  development:
+    name: development

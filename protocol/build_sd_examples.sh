@@ -1,1 +1,0 @@
-cargo build --example sd_provide && cargo build --example sd_discover

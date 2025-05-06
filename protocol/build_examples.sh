@@ -1,0 +1,1 @@
+docker run --rm -v "$PWD":/usr/src/protocol -w /usr/src/protocol rust:1.86.0-alpine cargo build --example sd_provide && cargo build --example sd_discover

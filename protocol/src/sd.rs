@@ -5,39 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const DEFAULT_BIND_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
-const DEFAULT_PORT: u16 = 8765;
-const DEFAULT_TIMEOUT_MS: u64 = 1000;
-const DEFAULT_RETRIES: u32 = 3;
-const DEFAULT_RETRY_DELAY_MS: u64 = 200;
-const MAX_PACKET_SIZE: usize = 1024;
+use crate::message::DiscoveryMessage;
 
-/// Message format for service discovery protocol
-#[derive(Debug, Clone)]
-enum DiscoveryMessage {
-    Request(String),
-    Response(String),
-}
-
-impl DiscoveryMessage {
-    fn to_bytes(&self) -> Vec<u8> {
-        match self {
-            DiscoveryMessage::Request(name) => format!("REQ:{}", name).into_bytes(),
-            DiscoveryMessage::Response(name) => format!("RESP:{}", name).into_bytes(),
-        }
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        let message = String::from_utf8_lossy(bytes);
-        if message.starts_with("REQ:") {
-            Some(DiscoveryMessage::Request(message[4..].to_string()))
-        } else if message.starts_with("RESP:") {
-            Some(DiscoveryMessage::Response(message[5..].to_string()))
-        } else {
-            None
-        }
-    }
-}
+use crate::constants::{DEFAULT_BIND_ADDR, DEFAULT_PORT, DEFAULT_RETRIES, DEFAULT_RETRY_DELAY_MS, DEFAULT_TIMEOUT_MS, MAX_PACKET_SIZE};
 
 /// Configuration for service discovery
 #[derive(Debug, Clone)]

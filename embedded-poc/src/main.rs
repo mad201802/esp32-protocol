@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use eth::start_eth;
+use protocol::sd::{DiscoveryConfig, ServiceDiscovery};
 
 mod eth;
 
@@ -46,8 +47,19 @@ fn main() -> anyhow::Result<()> {
         &sys_loop,
     );
 
+    let mut provider = ServiceDiscovery::with_config(DiscoveryConfig {
+        bind_addr: Ipv4Addr::new(0, 0, 0, 0).into(),
+        port: 8765,
+        timeout_ms: 1000,
+        retries: 3,
+        retry_delay_ms: 200,
+    });
+
+    provider.init().expect("Failed to initialize service discovery");
+    provider.provide_service("my_service").expect("Failed to provide service");
+    println!("Service provided");
+
     loop {
-        // Sleep for a while
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }

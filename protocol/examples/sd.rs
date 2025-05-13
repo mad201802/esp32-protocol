@@ -1,7 +1,7 @@
-use std::env;
+use std::{env, net::Ipv4Addr};
 
 use anyhow::Result;
-use protocol::sd::ServiceDiscovery;
+use protocol::sd::{config::ServiceDiscoveryConfig, ServiceDiscovery};
 
 fn main() -> Result<()>{
     let args: Vec<String> = env::args().collect();
@@ -21,6 +21,7 @@ fn main() -> Result<()>{
     println!("Service Discovery started with ID: {}, Timeout: {}", service_id, timeout);
 
     std::thread::sleep(std::time::Duration::from_secs(timeout));
+    sd.stop();
 
 
     println!("Service Discovery finished after {} seconds", timeout);

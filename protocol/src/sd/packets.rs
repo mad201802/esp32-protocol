@@ -2,6 +2,7 @@ use crate::application::packets::{
     ApplicationMessage, ApplicationMessageReturnCode, ApplicationMessageType,
 };
 
+#[derive(Debug, Clone)]
 pub enum ServiceDiscoveryMessage {
     FindService(u16),
     OfferService(u16),

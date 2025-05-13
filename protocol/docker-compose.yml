@@ -1,21 +1,31 @@
 services:
-  provider:
+  service-1:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd 1 5
+    command: /app/examples/sd 1 15
     networks:
       - development
     
-  discover:
+  service-2:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd 2 2
+    command: /app/examples/sd 2 10
     networks:
       - development
     depends_on:
-      - provider
+      - service-1
+
+  service-3:
+    image: ubuntu:22.04
+    volumes:
+      - ./target/debug/examples:/app/examples
+    command: /app/examples/sd 3 5
+    networks:
+      - development
+    depends_on:
+      - service-1
 
 networks:
   development:

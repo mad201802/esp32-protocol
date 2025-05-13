@@ -2,6 +2,8 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use std::io::{Read, Write};
 use rand::Rng;
 
+pub const MAX_PACKET_SIZE: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum ApplicationMessageType {
@@ -9,6 +11,10 @@ pub enum ApplicationMessageType {
     Notification = 0x02,
     Unsubscribe = 0x03,
     Response = 0x80,
+    SDFindService = 0x04,
+    SDOfferService = 0x05,
+    SDStopOfferService = 0x06,
+    INVALID = 0xFF,
 }
 
 impl From<u8> for ApplicationMessageType {
@@ -18,7 +24,28 @@ impl From<u8> for ApplicationMessageType {
             0x02 => ApplicationMessageType::Notification,
             0x03 => ApplicationMessageType::Unsubscribe,
             0x80 => ApplicationMessageType::Response,
-            _ => panic!("Invalid ApplicationMessageType value"),
+            0x04 => ApplicationMessageType::SDFindService,
+            0x05 => ApplicationMessageType::SDOfferService,
+            0x06 => ApplicationMessageType::SDStopOfferService,
+            _ => ApplicationMessageType::INVALID,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(u8)]
+pub enum ApplicationMessageReturnCode {
+    Ok = 0x00,
+    Error = 0x01,
+    INVALID = 0xFF,
+}
+
+impl From<u8> for ApplicationMessageReturnCode {
+    fn from(value: u8) -> Self {
+        match value {
+            0x00 => ApplicationMessageReturnCode::Ok,
+            0x01 => ApplicationMessageReturnCode::Error,
+            _ => ApplicationMessageReturnCode::INVALID,
         }
     }
 }
@@ -58,23 +85,6 @@ impl ApplicationResponseErrorMessage {
         })
     }
 
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u8)]
-pub enum ApplicationMessageReturnCode {
-    Ok = 0x00,
-    Error = 0x01,
-}
-
-impl From<u8> for ApplicationMessageReturnCode {
-    fn from(value: u8) -> Self {
-        match value {
-            0x00 => ApplicationMessageReturnCode::Ok,
-            0x01 => ApplicationMessageReturnCode::Error,
-            _ => panic!("Invalid ApplicationMessageReturnCode value"),
-        }
-    }
 }
 
 /// Represents a message in the custom protocol

@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr, UdpSocket},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -14,8 +17,9 @@ pub struct ServiceDiscovery {
     service_id: u16,
     config: ServiceDiscoveryConfig,
     socket: Option<Arc<UdpSocket>>,
-    server_thread: Option<JoinHandle<()>>,
-    server_running: Arc<Mutex<bool>>,
+    receiver_thread: Option<JoinHandle<()>>,
+    send_thread: Option<JoinHandle<()>>,
+    server_running: Arc<AtomicBool>,
     services_mapping: Arc<Mutex<HashMap<u16, IpAddr>>>,
 }
 
@@ -31,8 +35,9 @@ impl ServiceDiscovery {
             service_id: service_id,
             config,
             socket: None,
-            server_thread: None,
-            server_running: Arc::new(Mutex::new(false)),
+            receiver_thread: None,
+            send_thread: None,
+            server_running: Arc::new(AtomicBool::new(false)),
             services_mapping: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -45,7 +50,6 @@ impl ServiceDiscovery {
 
         socket.join_multicast_v4(&self.config.multicast_addr, &self.config.bind_addr)?;
         socket.set_multicast_loop_v4(false)?;
-        socket.set_nonblocking(true)?;
 
         let socket = Arc::new(socket);
         self.socket = Some(socket.clone());
@@ -59,25 +63,18 @@ impl ServiceDiscovery {
 
         let socket = self.socket.clone().unwrap();
 
-        let running = self.server_running.clone();
-        {
-            let mut running_guard = running.lock().unwrap();
-            *running_guard = true;
-        }
+        self.server_running.store(true, Ordering::SeqCst);
 
-        let services_mapping = self.services_mapping.clone();
         let service_id = self.service_id.clone();
-        let multicast_addr = SocketAddr::new(
-            IpAddr::V4(self.config.multicast_addr),
-            self.config.port,
-        );
+        let services_mapping = self.services_mapping.clone();
 
-        let server_running = running.clone();
-        let server_thread = std::thread::spawn(move || {
-            while *server_running.lock().unwrap() {
+        let server_running = self.server_running.clone();
+        let receiver_socket = socket.try_clone()?;
+        let receiver_thread = std::thread::spawn(move || {
+            while server_running.load(Ordering::SeqCst) {
                 let mut buf = [0; 768];
 
-                match socket.recv_from(&mut buf) {
+                match receiver_socket.recv_from(&mut buf) {
                     Ok((size, src)) => {
                         if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
                             match packet {
@@ -87,7 +84,7 @@ impl ServiceDiscovery {
                                         let response =
                                             ServiceDiscoveryMessage::OfferService(service_id);
                                         let response_bytes = response.to_bytes();
-                                        socket.send_to(&response_bytes, src).unwrap();
+                                        receiver_socket.send_to(&response_bytes, src).unwrap();
                                     }
                                 }
                                 ServiceDiscoveryMessage::OfferService(id) => {
@@ -113,8 +110,16 @@ impl ServiceDiscovery {
                         }
                     }
                 }
+            }
+        });
 
-                // Braodcast own service ID
+        let service_id = self.service_id.clone();
+        let multicast_addr =
+            SocketAddr::new(IpAddr::V4(self.config.multicast_addr), self.config.port);
+
+        let server_running = self.server_running.clone();
+        let send_thread = std::thread::spawn(move || {
+            while server_running.load(Ordering::SeqCst) {
                 let broadcast_message = ServiceDiscoveryMessage::OfferService(service_id);
                 let broadcast_bytes = broadcast_message.to_bytes();
                 match socket.send_to(&broadcast_bytes, multicast_addr) {
@@ -124,43 +129,43 @@ impl ServiceDiscovery {
                     }
                 }
 
-                // Print current services mapping
-                {
-                    let mapping = services_mapping.lock().unwrap();
-                    println!("Current services mapping: {:?}", *mapping);
-                }
-
                 // Sleep for a while to avoid busy waiting
-                thread::sleep(Duration::from_millis(500));
+                thread::sleep(Duration::from_secs(1));
             }
         });
 
-        self.server_thread = Some(server_thread);
+        self.receiver_thread = Some(receiver_thread);
+        self.send_thread = Some(send_thread);
         Ok(())
     }
 
     pub fn stop(&mut self) {
+        println!("Stopping service discovery...");
+        self.server_running.store(false, Ordering::SeqCst);
+
+        if let Some(receiver_thread) = self.receiver_thread.take() {
+            receiver_thread.join().unwrap();
+        }
+        println!("Receiver thread stopped");
+
+        if let Some(send_thread) = self.send_thread.take() {
+            send_thread.join().unwrap();
+        }
+        println!("Sender thread stopped");
+
         let multicast_addr =
             SocketAddr::new(IpAddr::V4(self.config.multicast_addr), self.config.port);
-
-        let running = self.server_running.clone();
-        {
-            let mut running_guard = running.lock().unwrap();
-            *running_guard = false;
-        }
-
-        if let Some(thread) = self.server_thread.take() {
-            thread.join().unwrap();
-        }
-
-        if let Some(socket) = &self.socket {
+        if let Some(socket) = self.socket.take() {
             let stop_message = ServiceDiscoveryMessage::StopOfferService(self.service_id);
             let stop_bytes = stop_message.to_bytes();
             socket.send_to(&stop_bytes, multicast_addr).unwrap();
             println!("[SOS] Sent StopOfferService message");
-        } else {
-            eprintln!("Socket not initialized, cannot send StopOfferService message");
         }
     }
+}
 
+impl Drop for ServiceDiscovery {
+    fn drop(&mut self) {
+        self.stop();
+    }
 }

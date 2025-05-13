@@ -1,4 +1,6 @@
 pub mod packets;
-pub mod _impl;
 pub mod config;
 mod constants;
+
+mod _impl;
+pub use self::_impl::*;

@@ -3,16 +3,15 @@ services:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd_provide
+    command: /app/examples/sd 1 5
     networks:
       - development
-    restart: unless-stopped
     
   discover:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd_discover
+    command: /app/examples/sd 2 2
     networks:
       - development
     depends_on:

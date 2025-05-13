@@ -1,10 +1,7 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr, UdpSocket},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU16, Ordering},
-    },
+    sync::{Arc, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -18,6 +15,7 @@ pub struct ServiceDiscovery {
     config: ServiceDiscoveryConfig,
     socket: Option<Arc<UdpSocket>>,
     server_thread: Option<JoinHandle<()>>,
+    server_running: Arc<Mutex<bool>>,
     services_mapping: Arc<Mutex<HashMap<u16, IpAddr>>>,
 }
 
@@ -34,6 +32,7 @@ impl ServiceDiscovery {
             config,
             socket: None,
             server_thread: None,
+            server_running: Arc::new(Mutex::new(false)),
             services_mapping: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -43,7 +42,7 @@ impl ServiceDiscovery {
 
         socket.set_broadcast(true)?;
         socket.set_nonblocking(true)?;
-        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
+        socket.set_ttl(100)?;
 
         let socket = Arc::new(socket);
         self.socket = Some(socket.clone());
@@ -57,19 +56,32 @@ impl ServiceDiscovery {
 
         let socket = self.socket.clone().unwrap();
 
+        let running = self.server_running.clone();
+        {
+            let mut running_guard = running.lock().unwrap();
+            *running_guard = true;
+        }
+
         let services_mapping = self.services_mapping.clone();
         let service_id = self.service_id.clone();
         let config = self.config.clone();
+
+        let server_running = running.clone();
         let server_thread = std::thread::spawn(move || {
-            loop {
-                let mut buf = [0; 1024];
+
+            let mut broadcast_counter = 0;
+            let mut offer_service_counter = 0;
+
+            while *server_running.lock().unwrap() {
+                let mut buf = [0; 512];
+
                 match socket.recv_from(&mut buf) {
                     Ok((size, src)) => {
                         if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
                             match packet {
                                 ServiceDiscoveryMessage::FindService(id) => {
-                                    if service_id == id {
-                                        println!("Received FindService for ID: {}", id);
+                                    if id == service_id {
+                                        println!("Received FindService for ID: {} ({})", id, 0);
                                         // Handle FindService
                                         let response =
                                             ServiceDiscoveryMessage::OfferService(service_id);
@@ -79,19 +91,22 @@ impl ServiceDiscovery {
                                 }
                                 ServiceDiscoveryMessage::OfferService(id) => {
                                     if id != service_id {
-                                        println!("Received OfferService for ID: {}", id);
+                                        offer_service_counter += 1;
+                                        println!("Received OfferService for ID: {} ({})", id, offer_service_counter);
                                         // Handle OfferService
                                         let mut mapping = services_mapping.lock().unwrap();
                                         mapping.insert(id, src.ip());
                                     }
                                 }
                                 ServiceDiscoveryMessage::StopOfferService(id) => {
-                                    println!("Received StopOfferService for ID: {}", id);
-                                    // Handle StopOfferService
-                                    let mut mapping = services_mapping.lock().unwrap();
-                                    if mapping.contains_key(&id) {
-                                        mapping.remove(&id);
-                                        println!("Removed service ID: {}", id);
+                                    if id != service_id {
+                                        println!("Received StopOfferService for ID: {}", id);
+                                        // Handle StopOfferService
+                                        let mut mapping = services_mapping.lock().unwrap();
+                                        if mapping.contains_key(&id) {
+                                            mapping.remove(&id);
+                                            println!("Removed service ID: {}", id);
+                                        }
                                     }
                                 }
                             }
@@ -114,25 +129,47 @@ impl ServiceDiscovery {
                     SocketAddr::new(IpAddr::from([255, 255, 255, 255]), config.port),
                 ) {
                     Ok(_) => {
-                        println!("Broadcasted service ID: {}", service_id);
+                        broadcast_counter += 1;
+                        println!(
+                            "Broadcasting service ID: {} ({})",
+                            service_id, broadcast_counter
+                        );
                     }
                     Err(e) => {
                         eprintln!("Error broadcasting service ID: {}", e);
                     }
                 }
-
-                // Print current services mapping
-                let mapping = services_mapping.lock().unwrap();
-                println!("Current services mapping:");
-                for (id, ip) in mapping.iter() {
-                    println!("Service ID: {}, IP: {}", id, ip);
-                }
-
-                thread::sleep(Duration::from_millis(500));
             }
         });
 
         self.server_thread = Some(server_thread);
         Ok(())
+    }
+}
+
+impl Drop for ServiceDiscovery {
+    fn drop(&mut self) {
+        let running = self.server_running.clone();
+        {
+            let mut running_guard = running.lock().unwrap();
+            *running_guard = false;
+        }
+
+        if let Some(thread) = self.server_thread.take() {
+            thread.join().unwrap();
+        }
+
+        if let Some(socket) = &self.socket {
+            let stop_message = ServiceDiscoveryMessage::StopOfferService(self.service_id);
+            let stop_bytes = stop_message.to_bytes();
+            socket
+                .send_to(
+                    &stop_bytes,
+                    SocketAddr::new(IpAddr::from([255, 255, 255, 255]), self.config.port),
+                )
+                .unwrap();
+        } else {
+            eprintln!("Socket not initialized, cannot send StopOfferService message");
+        }
     }
 }

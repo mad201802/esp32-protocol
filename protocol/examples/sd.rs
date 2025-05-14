@@ -1,7 +1,7 @@
-use std::{env, net::Ipv4Addr};
+use std::{env};
 
 use anyhow::Result;
-use protocol::sd::{config::ServiceDiscoveryConfig, ServiceDiscovery};
+use protocol::sd::{ServiceDiscovery};
 
 fn main() -> Result<()>{
     let args: Vec<String> = env::args().collect();

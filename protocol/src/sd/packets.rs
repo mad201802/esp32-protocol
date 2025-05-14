@@ -1,7 +1,3 @@
-use crate::application::packets::{
-    ApplicationMessage, ApplicationMessageReturnCode, ApplicationMessageType,
-};
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServiceDiscoveryMessage {
     OfferService(u16),

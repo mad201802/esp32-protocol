@@ -65,7 +65,6 @@ impl ServiceDiscovery {
 
         self.server_running.store(true, Ordering::SeqCst);
 
-        let service_id = self.service_id.clone();
         let services_mapping = self.services_mapping.clone();
 
         let server_running = self.server_running.clone();

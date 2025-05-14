@@ -2,8 +2,6 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::sd::config::ServiceDiscoveryConfig;
 
-use super::constants::{DEFAULT_BIND_ADDR, DEFAULT_PORT};
-
 pub struct ApplicationConfig {
     pub bind_addr: IpAddr,
     pub port: u16,

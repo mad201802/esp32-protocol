@@ -1,15 +1,16 @@
 use std::{
     collections::HashMap,
-    net::{IpAddr, SocketAddr, UdpSocket},
+    net::{IpAddr, SocketAddrV4},
+    os::unix::net::SocketAddr,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
-    thread::{self, JoinHandle},
-    time::Duration,
 };
+use tokio::time::{Duration, sleep};
 
 use anyhow::Result;
+use tokio::{net::UdpSocket, sync::Mutex, task::JoinHandle};
 
 use super::{config::ServiceDiscoveryConfig, packets::ServiceDiscoveryMessage};
 
@@ -42,13 +43,11 @@ impl ServiceDiscovery {
         }
     }
 
-    pub fn init(&mut self) -> Result<()> {
-        let socket = UdpSocket::bind(SocketAddr::new(
-            IpAddr::V4(self.config.bind_addr),
-            self.config.port,
-        ))?;
+    pub async fn init(&mut self) -> Result<()> {
+        let socket_addr = SocketAddrV4::new(self.config.bind_addr, self.config.port);
+        let socket = UdpSocket::bind(socket_addr).await?;
 
-        socket.join_multicast_v4(&self.config.multicast_addr, &self.config.bind_addr)?;
+        socket.join_multicast_v4(self.config.multicast_addr, self.config.bind_addr)?;
         socket.set_multicast_loop_v4(false)?;
 
         let socket = Arc::new(socket);
@@ -56,7 +55,7 @@ impl ServiceDiscovery {
         Ok(())
     }
 
-    pub fn start(&mut self) -> Result<()> {
+    pub async fn start(&mut self) -> Result<()> {
         if self.socket.is_none() {
             return Err(anyhow::anyhow!("Socket not initialized"));
         }
@@ -68,35 +67,43 @@ impl ServiceDiscovery {
         let services_mapping = self.services_mapping.clone();
 
         let server_running = self.server_running.clone();
-        let receiver_socket = socket.try_clone()?;
-        let receiver_thread = std::thread::spawn(move || {
-            while server_running.load(Ordering::SeqCst) {
-                let mut buf = [0; 768];
+        let receiver_socket = socket.clone();
+        let receiver_thread = tokio::spawn({
+            let services_mapping = services_mapping.clone();
+            let server_running = server_running.clone();
+            let receiver_socket = receiver_socket.clone();
+            async move {
+                while server_running.load(Ordering::SeqCst) {
+                    let mut buf = [0; 768];
 
-                match receiver_socket.recv_from(&mut buf) {
-                    Ok((size, src)) => {
-                        if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
-                            match packet {
-                                ServiceDiscoveryMessage::OfferService(id) => {
-                                    println!("Received OfferService for ID: {}", id);
-                                    let mut mapping = services_mapping.lock().unwrap();
-                                    mapping.insert(id, src.ip());
-                                }
-                                ServiceDiscoveryMessage::StopOfferService(id) => {
-                                    println!(" [RSOS] Received StopOfferService for ID: {}", id);
-                                    let mut mapping = services_mapping.lock().unwrap();
-                                    if mapping.contains_key(&id) {
-                                        mapping.remove(&id);
+                    match receiver_socket.recv_from(&mut buf).await {
+                        Ok((size, src)) => {
+                            if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
+                                match packet {
+                                    ServiceDiscoveryMessage::OfferService(id) => {
+                                        println!("Received OfferService for ID: {}", id);
+                                        let mut mapping = services_mapping.lock().await;
+                                        mapping.insert(id, src.ip());
+                                    }
+                                    ServiceDiscoveryMessage::StopOfferService(id) => {
+                                        println!(
+                                            " [RSOS] Received StopOfferService for ID: {}",
+                                            id
+                                        );
+                                        let mut mapping = services_mapping.lock().await;
+                                        if mapping.contains_key(&id) {
+                                            mapping.remove(&id);
+                                        }
                                     }
                                 }
+                            } else {
+                                eprintln!("Failed to parse packet");
                             }
-                        } else {
-                            eprintln!("Failed to parse packet");
                         }
-                    }
-                    Err(e) => {
-                        if e.kind() != std::io::ErrorKind::WouldBlock {
-                            eprintln!("Error receiving data: {}", e);
+                        Err(e) => {
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                eprintln!("Error receiving data: {}", e);
+                            }
                         }
                     }
                 }
@@ -104,23 +111,21 @@ impl ServiceDiscovery {
         });
 
         let service_id = self.service_id.clone();
-        let multicast_addr =
-            SocketAddr::new(IpAddr::V4(self.config.multicast_addr), self.config.port);
+        let multicast_addr = SocketAddrV4::new(self.config.multicast_addr, self.config.port);
 
-        let server_running = self.server_running.clone();
-        let send_thread = std::thread::spawn(move || {
-            while server_running.load(Ordering::SeqCst) {
-                let broadcast_message = ServiceDiscoveryMessage::OfferService(service_id);
-                let broadcast_bytes = broadcast_message.to_bytes();
-                match socket.send_to(&broadcast_bytes, multicast_addr) {
-                    Ok(_) => {}
-                    Err(e) => {
+        let send_thread = tokio::spawn({
+            let socket = socket.clone();
+            let server_running = server_running.clone();
+            async move {
+                while server_running.load(Ordering::SeqCst) {
+                    let broadcast_message = ServiceDiscoveryMessage::OfferService(service_id);
+                    let broadcast_bytes = broadcast_message.to_bytes();
+                    if let Err(e) = socket.send_to(&broadcast_bytes, multicast_addr).await {
                         eprintln!("Error broadcasting service ID: {}", e);
                     }
+                    // Sleep for a while to avoid busy waiting
+                    sleep(Duration::from_secs(1)).await;
                 }
-
-                // Sleep for a while to avoid busy waiting
-                thread::sleep(Duration::from_secs(1));
             }
         });
 
@@ -129,33 +134,30 @@ impl ServiceDiscovery {
         Ok(())
     }
 
-    pub fn stop(&mut self) {
+    pub async fn stop(&mut self) {
         println!("Stopping service discovery...");
         self.server_running.store(false, Ordering::SeqCst);
 
         if let Some(receiver_thread) = self.receiver_thread.take() {
-            receiver_thread.join().unwrap();
+            if let Err(e) = receiver_thread.await {
+                eprintln!("Receiver thread error: {:?}", e);
+            }
         }
         println!("Receiver thread stopped");
 
         if let Some(send_thread) = self.send_thread.take() {
-            send_thread.join().unwrap();
+            if let Err(e) = send_thread.await {
+                eprintln!("Sender thread error: {:?}", e);
+            }
         }
         println!("Sender thread stopped");
 
-        let multicast_addr =
-            SocketAddr::new(IpAddr::V4(self.config.multicast_addr), self.config.port);
+        let multicast_addr = SocketAddrV4::new(self.config.multicast_addr, self.config.port);
         if let Some(socket) = self.socket.take() {
             let stop_message = ServiceDiscoveryMessage::StopOfferService(self.service_id);
             let stop_bytes = stop_message.to_bytes();
-            socket.send_to(&stop_bytes, multicast_addr).unwrap();
-            println!("[SOS] Sent StopOfferService message");
+            // Use tokio::spawn to send the message asynchronously
+            let _ = socket.send_to(&stop_bytes, multicast_addr).await;
         }
-    }
-}
-
-impl Drop for ServiceDiscovery {
-    fn drop(&mut self) {
-        self.stop();
     }
 }

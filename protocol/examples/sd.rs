@@ -2,8 +2,9 @@ use std::{env};
 
 use anyhow::Result;
 use protocol::sd::{ServiceDiscovery};
+use tokio::runtime::Runtime;
 
-fn main() -> Result<()>{
+async fn _main() -> Result<()>{
     let args: Vec<String> = env::args().collect();
     let service_id = args.get(1)
         .expect("Please provide a service ID")
@@ -16,14 +17,22 @@ fn main() -> Result<()>{
         .expect("Invalid timeout");
 
     let mut sd = ServiceDiscovery::new(service_id);
-    sd.init()?;
-    sd.start()?;
+    sd.init().await?;
+    sd.start().await?;
     println!("Service Discovery started with ID: {}, Timeout: {}", service_id, timeout);
 
     std::thread::sleep(std::time::Duration::from_secs(timeout));
-    sd.stop();
+    sd.stop().await;
 
 
     println!("Service Discovery finished after {} seconds", timeout);
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let rt  = Runtime::new()?;
+
+    rt.block_on(async {
+        _main().await
+    })
 }

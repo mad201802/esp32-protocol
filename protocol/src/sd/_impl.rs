@@ -78,15 +78,6 @@ impl ServiceDiscovery {
                     Ok((size, src)) => {
                         if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
                             match packet {
-                                // If a FindService message is received, check if the ID matches
-                                ServiceDiscoveryMessage::FindService(id) => {
-                                    if id == service_id {
-                                        let response =
-                                            ServiceDiscoveryMessage::OfferService(service_id);
-                                        let response_bytes = response.to_bytes();
-                                        receiver_socket.send_to(&response_bytes, src).unwrap();
-                                    }
-                                }
                                 ServiceDiscoveryMessage::OfferService(id) => {
                                     println!("Received OfferService for ID: {}", id);
                                     let mut mapping = services_mapping.lock().unwrap();

@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::sd::config::ServiceDiscoveryConfig;
 
@@ -13,8 +13,8 @@ pub struct ApplicationConfig {
 impl Default for ApplicationConfig {
     fn default() -> Self {
         Self {
-            bind_addr: DEFAULT_BIND_ADDR,
-            port: DEFAULT_PORT,
+            bind_addr: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            port: 5678,
             discovery_config: ServiceDiscoveryConfig::default(),
         }
     }

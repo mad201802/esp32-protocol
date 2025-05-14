@@ -2,16 +2,15 @@ use crate::application::packets::{
     ApplicationMessage, ApplicationMessageReturnCode, ApplicationMessageType,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ServiceDiscoveryMessage {
-    FindService(u16),
     OfferService(u16),
     StopOfferService(u16)
 }
 
 impl  ServiceDiscoveryMessage {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
-        if bytes.len() < 2 {
+        if bytes.len() < 3 {
             return Err(());
         }
 
@@ -19,18 +18,69 @@ impl  ServiceDiscoveryMessage {
         let service_id = u16::from_be_bytes([bytes[1], bytes[2]]);
 
         match message_type {
-            0x01 => Ok(ServiceDiscoveryMessage::FindService(service_id)),
-            0x02 => Ok(ServiceDiscoveryMessage::OfferService(service_id)),
-            0x03 => Ok(ServiceDiscoveryMessage::StopOfferService(service_id)),
+            0x01 => Ok(ServiceDiscoveryMessage::OfferService(service_id)),
+            0x02 => Ok(ServiceDiscoveryMessage::StopOfferService(service_id)),
             _ => Err(()),
         }
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
-            ServiceDiscoveryMessage::FindService(id) => vec![0x01, (*id >> 8) as u8, *id as u8],
-            ServiceDiscoveryMessage::OfferService(id) => vec![0x02, (*id >> 8) as u8, *id as u8],
-            ServiceDiscoveryMessage::StopOfferService(id) => vec![0x03, (*id >> 8) as u8, *id as u8],
+            ServiceDiscoveryMessage::OfferService(id) => vec![0x01, (*id >> 8) as u8, *id as u8],
+            ServiceDiscoveryMessage::StopOfferService(id) => vec![0x02, (*id >> 8) as u8, *id as u8],
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_offer_service_to_bytes_and_from_bytes() {
+        let msg = ServiceDiscoveryMessage::OfferService(0x1234);
+        let bytes = msg.to_bytes();
+        assert_eq!(bytes, vec![0x01, 0x12, 0x34]);
+        let parsed = ServiceDiscoveryMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn test_stop_offer_service_to_bytes_and_from_bytes() {
+        let msg = ServiceDiscoveryMessage::StopOfferService(0xABCD);
+        let bytes = msg.to_bytes();
+        assert_eq!(bytes, vec![0x02, 0xAB, 0xCD]);
+        let parsed = ServiceDiscoveryMessage::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, msg);
+    }
+
+    #[test]
+    fn test_from_bytes_invalid_type() {
+        let bytes = vec![0xFF, 0x00, 0x01];
+        assert!(ServiceDiscoveryMessage::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_from_bytes_too_short() {
+        let bytes = vec![0x01];
+        assert!(ServiceDiscoveryMessage::from_bytes(&bytes).is_err());
+        let bytes = vec![0x01, 0x02];
+        assert!(ServiceDiscoveryMessage::from_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn test_to_bytes_and_from_bytes_roundtrip() {
+        let ids = [0x0000, 0x0001, 0x00FF, 0xFFFF];
+        for &id in &ids {
+            let offer = ServiceDiscoveryMessage::OfferService(id);
+            let stop = ServiceDiscoveryMessage::StopOfferService(id);
+            assert_eq!(
+                ServiceDiscoveryMessage::from_bytes(&offer.to_bytes()).unwrap(),
+                offer
+            );
+            assert_eq!(
+                ServiceDiscoveryMessage::from_bytes(&stop.to_bytes()).unwrap(),
+                stop
+            );
         }
     }
 }

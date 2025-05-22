@@ -5,7 +5,7 @@ use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4
 use esp_idf_sys::esp;
 use eth::start_eth;
 use protocol::sd::ServiceDiscovery;
-use tokio::runtime::{self, Runtime};
+use tokio::runtime;
 
 mod eth;
 

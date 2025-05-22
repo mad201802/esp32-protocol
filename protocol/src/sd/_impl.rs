@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use log::{debug, error, info};
 use tokio::time::{Duration, sleep};
 
 use anyhow::Result;
@@ -14,12 +15,13 @@ use tokio::{net::UdpSocket, sync::Mutex, task::JoinHandle};
 
 use super::{config::ServiceDiscoveryConfig, packets::ServiceDiscoveryMessage};
 
+#[derive(Clone)]
 pub struct ServiceDiscovery {
     service_id: u16,
     config: ServiceDiscoveryConfig,
     socket: Option<Arc<UdpSocket>>,
-    receiver_thread: Option<JoinHandle<()>>,
-    send_thread: Option<JoinHandle<()>>,
+    receiver_thread: Option<Arc<JoinHandle<()>>>,
+    send_thread: Option<Arc<JoinHandle<()>>>,
     server_running: Arc<AtomicBool>,
     services_mapping: Arc<Mutex<HashMap<u16, IpAddr>>>,
 }
@@ -32,6 +34,10 @@ impl ServiceDiscovery {
 
     /// Creates a new instance of `ServiceDiscovery` with the provided configuration.
     pub fn with_config(service_id: u16, config: ServiceDiscoveryConfig) -> Self {
+        info!(
+            "Creating new service discovery with ID: {}",
+            service_id
+        );
         Self {
             service_id: service_id,
             config,
@@ -44,6 +50,10 @@ impl ServiceDiscovery {
     }
 
     pub async fn init(&mut self) -> Result<()> {
+        info!(
+            "Initializing service discovery with ID: {}",
+            self.service_id
+        );
         let socket_addr = SocketAddrV4::new(self.config.bind_addr, self.config.port);
         let socket = UdpSocket::bind(socket_addr).await?;
 
@@ -52,6 +62,12 @@ impl ServiceDiscovery {
 
         let socket = Arc::new(socket);
         self.socket = Some(socket.clone());
+
+        info!(
+            "Service discovery initialized with ID: {} and socket: {:?}",
+            self.service_id,
+            socket
+        );
         Ok(())
     }
 
@@ -59,6 +75,12 @@ impl ServiceDiscovery {
         if self.socket.is_none() {
             return Err(anyhow::anyhow!("Socket not initialized"));
         }
+
+        info!(
+            "Starting service discovery with ID: {} and socket: {:?}",
+            self.service_id,
+            self.socket
+        );
 
         let socket = self.socket.clone().unwrap();
 
@@ -81,12 +103,12 @@ impl ServiceDiscovery {
                             if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
                                 match packet {
                                     ServiceDiscoveryMessage::OfferService(id) => {
-                                        println!("Received OfferService for ID: {}", id);
+                                        debug!("Received OfferService for ID: {}", id);
                                         let mut mapping = services_mapping.lock().await;
                                         mapping.insert(id, src.ip());
                                     }
                                     ServiceDiscoveryMessage::StopOfferService(id) => {
-                                        println!(
+                                        debug!(
                                             " [RSOS] Received StopOfferService for ID: {}",
                                             id
                                         );
@@ -97,18 +119,24 @@ impl ServiceDiscovery {
                                     }
                                 }
                             } else {
-                                eprintln!("Failed to parse packet");
+                                error!("Failed to parse packet");
                             }
                         }
                         Err(e) => {
                             if e.kind() != std::io::ErrorKind::WouldBlock {
-                                eprintln!("Error receiving data: {}", e);
+                                error!("Error receiving data: {}", e);
                             }
                         }
                     }
                 }
             }
         });
+
+        info!(
+            "Service discovery receiver thread started with ID: {} and socket: {:?}",
+            self.service_id,
+            socket
+        );
 
         let service_id = self.service_id.clone();
         let multicast_addr = SocketAddrV4::new(self.config.multicast_addr, self.config.port);
@@ -121,7 +149,7 @@ impl ServiceDiscovery {
                     let broadcast_message = ServiceDiscoveryMessage::OfferService(service_id);
                     let broadcast_bytes = broadcast_message.to_bytes();
                     if let Err(e) = socket.send_to(&broadcast_bytes, multicast_addr).await {
-                        eprintln!("Error broadcasting service ID: {}", e);
+                        error!("Error broadcasting service ID: {}", e);
                     }
                     // Sleep for a while to avoid busy waiting
                     sleep(Duration::from_secs(1)).await;
@@ -129,28 +157,69 @@ impl ServiceDiscovery {
             }
         });
 
-        self.receiver_thread = Some(receiver_thread);
-        self.send_thread = Some(send_thread);
+        info!(
+            "Service discovery sender thread started with ID: {} and socket: {:?}",
+            self.service_id,
+            socket
+        );
+
+        self.receiver_thread = Some(Arc::new(receiver_thread));
+        self.send_thread = Some(Arc::new(send_thread));
+        
+        info!(
+            "Service discovery started with ID: {} and socket: {:?}",
+            self.service_id,
+            socket
+        );
+
         Ok(())
     }
 
     pub async fn stop(&mut self) {
-        println!("Stopping service discovery...");
+        info!(
+            "Stopping service discovery with ID: {} and socket: {:?}",
+            self.service_id,
+            self.socket
+        );
         self.server_running.store(false, Ordering::SeqCst);
 
         if let Some(receiver_thread) = self.receiver_thread.take() {
-            if let Err(e) = receiver_thread.await {
-                eprintln!("Receiver thread error: {:?}", e);
+            match Arc::try_unwrap(receiver_thread) {
+                Ok(join_handle) => {
+                    if let Err(e) = join_handle.await {
+                        error!("Receiver thread error: {:?}", e);
+                    }
+                }
+                Err(_) => {
+                    error!("Failed to unwrap Arc for receiver_thread");
+                }
             }
         }
-        println!("Receiver thread stopped");
+
+        info!(
+            "Receiver thread stopped with ID: {} and socket: {:?}",
+            self.service_id,
+            self.socket
+        );
 
         if let Some(send_thread) = self.send_thread.take() {
-            if let Err(e) = send_thread.await {
-                eprintln!("Sender thread error: {:?}", e);
+            match Arc::try_unwrap(send_thread) {
+                Ok(join_handle) => {
+                    if let Err(e) = join_handle.await {
+                        error!("Sender thread error: {:?}", e);
+                    }
+                }
+                Err(_) => {
+                    error!("Failed to unwrap Arc for send_thread");
+                }
             }
         }
-        println!("Sender thread stopped");
+
+        info!(
+            "Sender thread stopped with ID: {} and socket: {:?}",
+            self.service_id,
+            self.socket
+        );
 
         let multicast_addr = SocketAddrV4::new(self.config.multicast_addr, self.config.port);
         if let Some(socket) = self.socket.take() {
@@ -159,5 +228,12 @@ impl ServiceDiscovery {
             // Use tokio::spawn to send the message asynchronously
             let _ = socket.send_to(&stop_bytes, multicast_addr).await;
         }
+
+        info!(
+            "Service discovery stopped with ID: {} and socket: {:?}",
+            self.service_id,
+            self.socket
+        );
+
     }
 }

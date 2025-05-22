@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use rand::Rng;
 
 pub const MAX_PACKET_SIZE: usize = 1024;
+pub type RawMessageData = (ApplicationMessage, std::net::SocketAddr);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
@@ -122,6 +123,11 @@ impl ApplicationMessage {
             length,
             payload,
         }
+    }
+
+    pub fn set_payload(&mut self, payload: Vec<u8>) {
+        self.length = 2 + 2 + 4 + 2 + 1 + 1 + payload.len() as u32;
+        self.payload = payload;
     }
 
     /// Serialize the message to a writer

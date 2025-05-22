@@ -2,6 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use crate::sd::config::ServiceDiscoveryConfig;
 
+#[derive(Clone)]
 pub struct ServiceApplicationConfig {
     pub bind_addr: IpAddr,
     pub port: u16,

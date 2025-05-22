@@ -4,7 +4,7 @@ services:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd 1 15
+    command: /app/examples/app 1 15
     networks:
       - development
     
@@ -13,7 +13,7 @@ services:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd 2 7
+    command: /app/examples/app 2 7
     networks:
       - development
     depends_on:
@@ -24,7 +24,7 @@ services:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd 3 5
+    command: /app/examples/app 3 5
     networks:
       - development
     depends_on:
@@ -35,7 +35,7 @@ services:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
-    command: /app/examples/sd 4 3
+    command: /app/examples/app 4 3
     networks:
       - development
     depends_on:

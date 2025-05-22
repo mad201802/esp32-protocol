@@ -1,1 +1,1 @@
-docker run --rm -v "$PWD":/usr/src/protocol -w /usr/src/protocol rust:1.86.0-slim cargo build --example sd
+docker run --rm -v "$PWD":/usr/src/protocol -w /usr/src/protocol rust:1.86.0-slim cargo build --example app

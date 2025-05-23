@@ -75,6 +75,7 @@ impl ServiceApplication {
         }
     }
 
+    /// Initialize the application (service discovery, etc.)
     pub async fn init(&mut self) -> Result<()> {
         // Initialize the service discovery component
         let mut service_discovery = ServiceDiscovery::new(self.service_id);
@@ -99,6 +100,7 @@ impl ServiceApplication {
         trace!("Event {} offered", event_id);
     }
 
+    // Notifying all subscribing clients of an event
     pub async fn notify(&self, event_id: u16, payload: Vec<u8>) {
         trace!("Notifying event {}", event_id);
         let offered_events = self.offered_events.lock().await;
@@ -127,9 +129,6 @@ impl ServiceApplication {
         let socket = tokio::net::TcpStream::connect(SocketAddr::new(ip_addr, self.config.port))
             .await
             .unwrap();
-
-        let mut connected_sockets = self.connected_sockets.lock().await;
-        connected_sockets.insert(socket.peer_addr().unwrap());
 
         let server = Arc::new(self.clone());
         let client_response_rx = server.client_response_tx.subscribe();
@@ -315,23 +314,23 @@ impl ServiceApplication {
 
     async fn handle_client(
         &self,
-        mut socket: TcpStream,
+        mut tcp_stream: TcpStream,
         mut client_response_rx: Receiver<RawMessageData>,
     ) {
         // Handle client connection
         info!(
             "Handling client connection from {:?}",
-            socket.peer_addr().unwrap()
+            tcp_stream.peer_addr().unwrap()
         );
 
-        let socket_addr = socket.peer_addr().unwrap();
+        let socket_addr = tcp_stream.peer_addr().unwrap();
 
         {
             let mut connected_sockets = self.connected_sockets.lock().await;
             connected_sockets.insert(socket_addr);
         }
 
-        let (reader, mut writer) = socket.split();
+        let (reader, mut writer) = tcp_stream.split();
         let mut reader = BufReader::new(reader);
         let mut buffer: Vec<u8> = Vec::new();
 

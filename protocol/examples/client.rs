@@ -37,7 +37,9 @@ async fn _main() -> Result<()> {
     ).await;
     println!("Waiting for response...");
 
-    Ok(())
+    loop {
+        time::sleep(time::Duration::from_secs(1)).await;
+    }
 }
 
 fn main() -> Result<()> {

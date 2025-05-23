@@ -1,9 +1,21 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::io::{Read, Write};
+use std::{io::{Read, Write}, sync::Arc};
 use rand::Rng;
 
 pub const MAX_PACKET_SIZE: usize = 1024;
+
 pub type RawMessageData = (ApplicationMessage, std::net::SocketAddr);
+
+/// Callback type for handling method invocations.
+pub type MethodInvokeCallback =
+    Arc<dyn Fn(Vec<u8>) -> Result<Vec<u8>, ApplicationResponseErrorMessage> + Send + Sync>;
+
+/// Callback type for handling method invocations.
+pub type MethodResponseCallback =
+    Arc<dyn Fn(Result<Vec<u8>, ApplicationResponseErrorMessage>) -> Result<Vec<u8>, ApplicationResponseErrorMessage> + Send + Sync>;
+
+/// Callback type for handling events.
+pub type OnEventInvokeCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]

@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use tokio::time::{Duration, sleep};
 
 use anyhow::Result;
@@ -103,12 +103,12 @@ impl ServiceDiscovery {
                             if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
                                 match packet {
                                     ServiceDiscoveryMessage::OfferService(id) => {
-                                        debug!("Received OfferService for ID: {}", id);
+                                        trace!("Received OfferService for ID: {}", id);
                                         let mut mapping = services_mapping.lock().await;
                                         mapping.insert(id, src.ip());
                                     }
                                     ServiceDiscoveryMessage::StopOfferService(id) => {
-                                        debug!(
+                                        trace!(
                                             " [RSOS] Received StopOfferService for ID: {}",
                                             id
                                         );
@@ -173,6 +173,15 @@ impl ServiceDiscovery {
         );
 
         Ok(())
+    }
+
+    pub async fn find_service(&self, service_id: u16) -> Option<IpAddr> {
+        let mapping = self.services_mapping.lock().await;
+        if let Some(ip) = mapping.get(&service_id) {
+            Some(*ip)
+        } else {
+            None
+        }
     }
 
     pub async fn stop(&mut self) {

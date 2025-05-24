@@ -4,6 +4,8 @@ services:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
+    environment:
+      - RUST_LOG=debug
     command: /app/examples/server
     networks:
       - development
@@ -13,6 +15,8 @@ services:
     image: ubuntu:22.04
     volumes:
       - ./target/debug/examples:/app/examples
+    environment:
+      - RUST_LOG=debug
     command: /app/examples/client
     networks:
       - development

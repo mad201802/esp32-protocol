@@ -4,7 +4,7 @@ use rand::Rng;
 
 pub const MAX_PACKET_SIZE: usize = 1024;
 
-pub type RawMessageData = (ApplicationMessage, std::net::SocketAddr);
+pub type RawMessageData = (ApplicationMessage, std::net::IpAddr);
 
 /// Callback type for handling method invocations.
 pub type MethodInvokeCallback =
@@ -22,6 +22,7 @@ pub type OnEventInvokeCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
 pub enum ApplicationMessageType {
     Request = 0x00,
     Notification = 0x02,
+    Subscribe = 0x01,
     Unsubscribe = 0x03,
     Response = 0x80,
     SDFindService = 0x04,
@@ -35,6 +36,7 @@ impl From<u8> for ApplicationMessageType {
         match value {
             0x00 => ApplicationMessageType::Request,
             0x02 => ApplicationMessageType::Notification,
+            0x01 => ApplicationMessageType::Subscribe,
             0x03 => ApplicationMessageType::Unsubscribe,
             0x80 => ApplicationMessageType::Response,
             0x04 => ApplicationMessageType::SDFindService,

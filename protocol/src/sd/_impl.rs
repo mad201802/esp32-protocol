@@ -1,13 +1,12 @@
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddrV4},
-    os::unix::net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
-use log::{debug, error, info, trace};
+use log::{error, info, trace};
 use tokio::time::{Duration, sleep};
 
 use anyhow::Result;

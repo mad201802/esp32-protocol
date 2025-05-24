@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -13,6 +14,7 @@ use tokio::{
         Mutex,
         broadcast::{Receiver, Sender},
     },
+    time,
 };
 
 use crate::{
@@ -34,13 +36,13 @@ pub struct ServiceApplication {
     config: ServiceApplicationConfig,
     service_discovery: Option<ServiceDiscovery>,
 
-    connected_sockets: Arc<Mutex<HashSet<SocketAddr>>>,
+    connected_sockets: Arc<Mutex<HashSet<IpAddr>>>,
 
     // Key: Method ID, Value: Callback
     offered_methods: HashMap<u16, MethodInvokeCallback>,
 
     // Key: Event ID, Value: Set of subscribers
-    offered_events: Arc<Mutex<HashMap<u16, HashSet<std::net::SocketAddr>>>>,
+    offered_events: Arc<Mutex<HashMap<u16, HashSet<IpAddr>>>>,
     subscribed_events: Arc<Mutex<HashMap<u16, OnEventInvokeCallback>>>,
 
     // Key: Request ID, Value: Callback
@@ -102,10 +104,9 @@ impl ServiceApplication {
 
     // Notifying all subscribing clients of an event
     pub async fn notify(&self, event_id: u16, payload: Vec<u8>) {
-        trace!("Notifying event {}", event_id);
         let offered_events = self.offered_events.lock().await;
         if let Some(clients_to_offer) = offered_events.get(&event_id) {
-            for client in clients_to_offer {
+            for client_ip in clients_to_offer {
                 let mut notification_packet = ApplicationMessage::new(
                     self.service_id,
                     event_id,
@@ -116,17 +117,20 @@ impl ServiceApplication {
                 );
                 notification_packet.set_payload(payload.clone());
 
+                debug!("Notifying event {} to {:?}", event_id, client_ip);
+
                 self.client_response_tx
-                    .send((notification_packet, *client))
+                    .send((notification_packet, *client_ip))
                     .unwrap();
             }
         }
     }
 
-    async fn connect(&self, ip_addr: IpAddr) {
+    /// Connect to a service via ip and port
+    async fn connect(&self, ip_addr: IpAddr, port: u16) {
         debug!("Connecting to service at {:?}", ip_addr);
 
-        let socket = tokio::net::TcpStream::connect(SocketAddr::new(ip_addr, self.config.port))
+        let socket = tokio::net::TcpStream::connect(SocketAddr::new(ip_addr, port))
             .await
             .unwrap();
 
@@ -135,18 +139,20 @@ impl ServiceApplication {
         tokio::spawn(async move {
             server.handle_client(socket, client_response_rx).await;
         });
+
+        time::sleep(Duration::from_millis(500)).await; // Wait for the client to be ready
     }
 
-    async fn service_to_socket(&mut self, service_id: u16) -> Option<SocketAddr> {
+    async fn service_to_ip(&mut self, service_id: u16) -> Option<IpAddr> {
         // Check if we can get the ip address of the service
 
-        debug!("Finding service with ID: {}", service_id);
+        trace!("Finding service with ID: {}", service_id);
 
         let service_discovery = self.service_discovery.as_mut().unwrap();
         let ip_addr = retry_with_delay_option(
             || async { service_discovery.find_service(service_id).await },
-            3,
-            1,
+            4,
+            500,
         )
         .await;
 
@@ -156,40 +162,27 @@ impl ServiceApplication {
             return None;
         }
 
-        debug!("Found service with ID: {} at {:?}", service_id, ip_addr);
+        trace!("Found service with ID: {} at {:?}", service_id, ip_addr);
 
         // If we have the ip, check if we have a open socket
         let ip_addr = ip_addr.unwrap();
 
         {
             let connected_sockets = self.connected_sockets.lock().await;
-            let socket = connected_sockets.iter().find(|&addr| addr.ip() == ip_addr);
-            if socket.is_some() {
-                debug!("Found socket for service with ID: {}", service_id);
-                return Some(*socket.unwrap());
-            } else {
-                debug!("No socket found for service with ID: {}", service_id);
+            if connected_sockets.contains(&ip_addr) {
+                return Some(ip_addr);
             }
         }
 
-        self.connect(ip_addr).await;
+        // If we dont have a open socket, connect to the service
+        self.connect(ip_addr, self.config.port).await;
 
-        {
-            let connected_sockets = self.connected_sockets.lock().await;
-            let socket = connected_sockets.iter().find(|&addr| addr.ip() == ip_addr);
-            if socket.is_some() {
-                debug!("Found socket for service with ID: {}", service_id);
-                return Some(*socket.unwrap());
-            } else {
-                error!(
-                    "No socket found for service with ID: {} after connecting",
-                    service_id
-                );
-            }
-        }
-
-        error!("Could not find socket for service with ID: {}", service_id);
-        None
+        // Return the ip address of the service
+        trace!(
+            "Connected to service with ID: {} at {:?}",
+            service_id, ip_addr
+        );
+        Some(ip_addr)
     }
 
     pub async fn call_method(
@@ -201,8 +194,8 @@ impl ServiceApplication {
     ) {
         debug!("Calling method {} on {:?}", method_id, service_id);
 
-        let socket = self.service_to_socket(service_id).await;
-        if socket.is_none() {
+        let ip_addr = self.service_to_ip(service_id).await;
+        if ip_addr.is_none() {
             error!("Could not find socket for service with ID: {}", service_id);
             return;
         }
@@ -216,12 +209,57 @@ impl ServiceApplication {
             payload,
         );
 
-        let mut open_requests = self.open_requests.lock().await;
-        open_requests.insert(request_packet.request_id, callback);
+        let request_id = request_packet.request_id;
+        match self
+            .client_response_tx
+            .send((request_packet, ip_addr.unwrap()))
+        {
+            Ok(_) => {
+                let mut open_requests = self.open_requests.lock().await;
+                open_requests.insert(request_id, callback);
+            }
+            Err(err) => {
+                error!("Failed to send request packet: {:?}", err);
+            }
+        }
+    }
 
-        self.client_response_tx
-            .send((request_packet, socket.unwrap()))
-            .unwrap();
+    pub async fn subscribe(
+        &mut self,
+        service_id: u16,
+        event_id: u16,
+        callback: OnEventInvokeCallback,
+    ) {
+        debug!("Subscribing to event {}", event_id);
+
+        let ip_addr = self.service_to_ip(service_id).await;
+        if ip_addr.is_none() {
+            error!("Could not find socket for service with ID: {}", service_id);
+            return;
+        }
+
+        let subscribe_packet = ApplicationMessage::new(
+            self.service_id,
+            event_id,
+            None,
+            ApplicationMessageType::Subscribe,
+            ApplicationMessageReturnCode::Ok,
+            vec![],
+        );
+
+        match self
+            .client_response_tx
+            .send((subscribe_packet, ip_addr.unwrap()))
+        {
+            Ok(_) => {
+                let mut subscribed_events = self.subscribed_events.lock().await;
+                subscribed_events.insert(event_id, callback);
+                debug!("Subscribed to event {}", event_id);
+            }
+            Err(err) => {
+                error!("Failed to send subscribe packet: {:?}", err);
+            }
+        }
     }
 
     async fn handle_message_data(&self) {
@@ -258,15 +296,6 @@ impl ServiceApplication {
                         };
                     }
 
-                    // Handle Event Subscriptions
-                    let mut offered_events = self.offered_events.lock().await;
-                    if let Some(connected_clients) = offered_events.get_mut(&packet.method_id) {
-                        debug!("New event subscription: {:?}", packet.method_id);
-
-                        // Add the client to the event
-                        connected_clients.insert(addr);
-                    }
-
                     self.client_response_tx
                         .send((response_packet, addr))
                         .unwrap();
@@ -274,14 +303,14 @@ impl ServiceApplication {
                 ApplicationMessageType::Response => {
                     trace!("Received Response Message: {:?}", packet);
                     let mut open_requests = self.open_requests.lock().await;
-                    if let Some(callback) = open_requests.remove(&packet.request_id) {
+                    if let Some(request_callback) = open_requests.remove(&packet.request_id) {
                         if packet.return_code == ApplicationMessageReturnCode::Ok {
-                            let _result = callback(Ok(packet.payload));
+                            let _result = request_callback(Ok(packet.payload));
                         } else {
                             let error_message =
                                 ApplicationResponseErrorMessage::from_bytes(&packet.payload)
                                     .unwrap();
-                            let _result = callback(Err(error_message));
+                            let _result = request_callback(Err(error_message));
                         }
                     }
                 }
@@ -290,6 +319,17 @@ impl ServiceApplication {
                     let subscribed_events = self.subscribed_events.lock().await;
                     if let Some(callback) = subscribed_events.get(&packet.method_id) {
                         callback(packet.payload);
+                    }
+                }
+                ApplicationMessageType::Subscribe => {
+                    // Handle Event Subscriptions
+                    let mut offered_events = self.offered_events.lock().await;
+                    if let Some(offered_events_clients) = offered_events.get_mut(&packet.method_id)
+                    {
+                        println!("!!! New event subscription: {:?}", packet.method_id);
+
+                        // Add the client to the event
+                        offered_events_clients.insert(addr);
                     }
                 }
                 ApplicationMessageType::Unsubscribe => {
@@ -312,12 +352,12 @@ impl ServiceApplication {
         }
     }
 
+    /// Handle incoming client connections and messages
     async fn handle_client(
         &self,
         mut tcp_stream: TcpStream,
         mut client_response_rx: Receiver<RawMessageData>,
     ) {
-        // Handle client connection
         info!(
             "Handling client connection from {:?}",
             tcp_stream.peer_addr().unwrap()
@@ -327,7 +367,7 @@ impl ServiceApplication {
 
         {
             let mut connected_sockets = self.connected_sockets.lock().await;
-            connected_sockets.insert(socket_addr);
+            connected_sockets.insert(socket_addr.ip());
         }
 
         let (reader, mut writer) = tcp_stream.split();
@@ -337,15 +377,17 @@ impl ServiceApplication {
         loop {
             tokio::select! {
                 result = reader.read_buf(&mut buffer) => {
+
+                    // Handle disconnection
                     if result.unwrap() == 0 {
                         info!("[Disconnected] {:?}", socket_addr);
                         {
                             let mut connected_sockets = self.connected_sockets.lock().await;
-                            connected_sockets.remove(&socket_addr);
+                            connected_sockets.remove(&socket_addr.ip());
 
                             let mut offered_events = self.offered_events.lock().await;
                             for (_, connected_clients) in offered_events.iter_mut() {
-                                connected_clients.remove(&socket_addr);
+                                connected_clients.remove(&socket_addr.ip());
                             }
                         }
                         break;
@@ -353,7 +395,7 @@ impl ServiceApplication {
 
                     match ApplicationMessage::from_bytes(&buffer.clone()) {
                         Ok(packet) => {
-                            self.message_process_tx.send((packet, socket_addr)).unwrap();
+                            self.message_process_tx.send((packet, socket_addr.ip())).unwrap();
                         },
                         Err(err) => {
                             error!("Error deserializing packet: {:?}", err);
@@ -365,7 +407,7 @@ impl ServiceApplication {
                 result = client_response_rx.recv() => {
                     let (msg, other_addr) = result.unwrap();
 
-                    if socket_addr == other_addr {
+                    if other_addr == socket_addr.ip()  {
                         trace!("Sending message to {:?}:{:?}", socket_addr, msg);
 
                         match ApplicationMessage::to_bytes(&msg) {
@@ -381,6 +423,29 @@ impl ServiceApplication {
                     }
                 }
             }
+        }
+    }
+
+    async fn _start_listening(&self) {
+        let listener = TcpListener::bind((self.config.bind_addr, self.config.port))
+            .await
+            .unwrap();
+
+        info!(
+            "Listening for incoming connections on {}:{}",
+            self.config.bind_addr, self.config.port
+        );
+
+        loop {
+            let (socket, _addr) = listener.accept().await.unwrap();
+            info!("[Connected] {:?}", _addr);
+
+            let client_response_rx: Receiver<RawMessageData> = self.client_response_tx.subscribe();
+
+            let server = Arc::new(self.clone());
+            tokio::spawn(async move {
+                server.handle_client(socket, client_response_rx).await;
+            });
         }
     }
 
@@ -400,41 +465,12 @@ impl ServiceApplication {
             server.handle_message_data().await;
         });
 
-        let listener = TcpListener::bind((self.config.bind_addr, self.config.port))
-            .await
-            .unwrap();
-
-        info!(
-            "Listening for incoming connections on {}:{}",
-            self.config.bind_addr, self.config.port
-        );
-
         if blocking {
-            loop {
-                let (socket, _addr) = listener.accept().await.unwrap();
-                info!("[Connected] {:?}", _addr);
-
-                let client_response_rx: Receiver<RawMessageData> =
-                    self.client_response_tx.subscribe();
-
-                let server = Arc::new(self.clone());
-                tokio::spawn(async move {
-                    server.handle_client(socket, client_response_rx).await;
-                });
-            }
+            self._start_listening().await;
         } else {
             let server = Arc::new(self.clone());
             tokio::spawn(async move {
-                loop {
-                    let (socket, _addr) = listener.accept().await.unwrap();
-                    info!("[Connected] {:?}", _addr);
-
-                    let server = Arc::new(server.clone());
-                    let client_response_rx = server.client_response_tx.subscribe();
-                    tokio::spawn(async move {
-                        server.handle_client(socket, client_response_rx).await;
-                    });
-                }
+                server._start_listening().await;
             });
         }
     }

@@ -1,12 +1,11 @@
-use std::{env, sync::Arc};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
-use env_logger::{Builder, Env};
-use protocol::{application::{_impl::ServiceApplication, packets::ApplicationResponseErrorMessage}, sd::ServiceDiscovery};
-use tokio::runtime::Runtime;
+use protocol::application::{_impl::ServiceApplication, packets::ApplicationResponseErrorMessage};
+use tokio::{runtime::Runtime, time};
 
 async fn _main() -> Result<()>{
-    env_logger::init_from_env(Env::default().default_filter_or("debug"));
+    env_logger::init();
 
     let mut app = ServiceApplication::new(0x01);
     app.init().await?;
@@ -28,8 +27,15 @@ async fn _main() -> Result<()>{
     )
     .await;
 
-    app.start(true).await;
-    Ok(())
+    app.offer_event(0x02).await;
+
+    app.start(false).await;
+    time::sleep(Duration::from_secs(2)).await;
+
+    loop {
+        app.notify(0x02, vec![0xba, 0xbe, 0xef]).await;
+        time::sleep(Duration::from_secs(1)).await;
+    }
 }
 
 fn main() -> Result<()> {

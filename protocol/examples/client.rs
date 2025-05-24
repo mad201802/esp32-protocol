@@ -1,27 +1,25 @@
-use std::{env, sync::Arc};
+use std::{sync::Arc};
 
 use anyhow::Result;
-use env_logger::{Builder, Env};
 use protocol::{
-    application::{_impl::ServiceApplication, packets::ApplicationResponseErrorMessage},
-    sd::ServiceDiscovery,
+    application::{_impl::ServiceApplication},
 };
 use tokio::{runtime::Runtime, time};
 
 async fn _main() -> Result<()> {
-    env_logger::init_from_env(Env::default().default_filter_or("debug"));
+    env_logger::init();
 
     let mut app = ServiceApplication::new(0x02);
     app.init().await?;
     app.start(false).await;
 
-    time::sleep(time::Duration::from_secs(5)).await;
+    time::sleep(time::Duration::from_secs(2)).await;
 
     println!("Calling method...");
     app.call_method(
         0x01,
         0x01,
-        vec![],
+        vec![0xba, 0xbe, 0xef],
         Arc::new(|data| {
             match data {
                 Ok(data) => {
@@ -35,7 +33,10 @@ async fn _main() -> Result<()> {
             Ok(vec![])
         }),
     ).await;
-    println!("Waiting for response...");
+
+    app.subscribe(0x01, 0x02, Arc::new(|data| {
+        println!("Received event data: {:?}", data);
+    })).await;
 
     loop {
         time::sleep(time::Duration::from_secs(1)).await;

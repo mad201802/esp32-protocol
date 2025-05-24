@@ -34,7 +34,7 @@ async fn _main() -> Result<()>{
 
     loop {
         app.notify(0x02, vec![0xba, 0xbe, 0xef]).await;
-        time::sleep(Duration::from_secs(1)).await;
+        time::sleep(Duration::from_millis(100)).await;
     }
 }
 

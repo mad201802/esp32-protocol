@@ -238,27 +238,81 @@ impl ServiceApplication {
             return;
         }
 
-        let subscribe_packet = ApplicationMessage::new(
-            self.service_id,
-            event_id,
-            None,
-            ApplicationMessageType::Subscribe,
-            ApplicationMessageReturnCode::Ok,
-            vec![],
-        );
+        let ip_addr = ip_addr.unwrap();
 
-        match self
-            .client_response_tx
-            .send((subscribe_packet, ip_addr.unwrap()))
-        {
-            Ok(_) => {
-                let mut subscribed_events = self.subscribed_events.lock().await;
-                subscribed_events.insert(event_id, callback);
-                debug!("Subscribed to event {}", event_id);
-            }
-            Err(err) => {
-                error!("Failed to send subscribe packet: {:?}", err);
-            }
+        // Retry mechanism for subscription
+        let subscription_successful = retry_with_delay_option(
+            || async {
+                let subscribe_packet = ApplicationMessage::new(
+                    self.service_id,
+                    event_id,
+                    None,
+                    ApplicationMessageType::Subscribe,
+                    ApplicationMessageReturnCode::Ok,
+                    vec![],
+                );
+
+                let request_id = subscribe_packet.request_id;
+                
+                // Send the subscription request
+                match self.client_response_tx.send((subscribe_packet, ip_addr)) {
+                    Ok(_) => {
+                        debug!("Sent subscription request for event {} with request_id {}", event_id, request_id);
+                        
+                        // Create a one-shot channel to wait for the response
+                        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                        let response_tx = Arc::new(Mutex::new(Some(response_tx)));
+                        
+                        // Store the response sender in open_requests
+                        {
+                            let mut open_requests = self.open_requests.lock().await;
+                            open_requests.insert(request_id, Arc::new(move |result| {
+                                if let Ok(mut tx_guard) = response_tx.try_lock() {
+                                    if let Some(tx) = tx_guard.take() {
+                                        let _ = tx.send(result);
+                                    }
+                                }
+                                Ok(vec![])
+                            }));
+                        }
+                        
+                        // Wait for response with timeout
+                        match tokio::time::timeout(Duration::from_millis(1000), response_rx).await {
+                            Ok(Ok(Ok(_))) => {
+                                debug!("Subscription confirmed for event {}", event_id);
+                                Some(())
+                            }
+                            Ok(Ok(Err(err))) => {
+                                error!("Subscription failed for event {}: {:?}", event_id, err);
+                                None
+                            }
+                            Ok(Err(_)) | Err(_) => {
+                                debug!("Subscription timeout for event {}, will retry", event_id);
+                                // Clean up the request from open_requests
+                                let mut open_requests = self.open_requests.lock().await;
+                                open_requests.remove(&request_id);
+                                None
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error!("Failed to send subscribe packet: {:?}", err);
+                        None
+                    }
+                }
+            },
+            4,
+            500,
+        )
+        .await;
+
+        if subscription_successful.is_some() {
+            // Only add to subscribed events after successful confirmation
+            let mut subscribed_events = self.subscribed_events.lock().await;
+            subscribed_events.insert(event_id, callback);
+            debug!("Successfully subscribed to event {}", event_id);
+        } else {
+            error!("Failed to subscribe to event {} after retries", event_id);
         }
     }
 
@@ -330,6 +384,41 @@ impl ServiceApplication {
 
                         // Add the client to the event
                         offered_events_clients.insert(addr);
+                        
+                        // Send a success response back to the client
+                        let response_packet = ApplicationMessage::new(
+                            packet.service_id,
+                            packet.method_id,
+                            Some(packet.request_id),
+                            ApplicationMessageType::Response,
+                            ApplicationMessageReturnCode::Ok,
+                            vec![],
+                        );
+                        
+                        self.client_response_tx
+                            .send((response_packet, addr))
+                            .unwrap();
+                    } else {
+                        error!("Event {} not offered, rejecting subscription from {:?}", packet.method_id, addr);
+                        
+                        // Send an error response back to the client
+                        let error_message = ApplicationResponseErrorMessage::new(
+                            0x02,
+                            format!("Event {} not offered", packet.method_id),
+                        );
+                        
+                        let response_packet = ApplicationMessage::new(
+                            packet.service_id,
+                            packet.method_id,
+                            Some(packet.request_id),
+                            ApplicationMessageType::Response,
+                            ApplicationMessageReturnCode::Error,
+                            error_message.to_bytes(),
+                        );
+                        
+                        self.client_response_tx
+                            .send((response_packet, addr))
+                            .unwrap();
                     }
                 }
                 ApplicationMessageType::Unsubscribe => {

@@ -1,11 +1,14 @@
 use std::net::Ipv4Addr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use esp_idf_sys::esp;
 use eth::start_eth;
-use protocol::sd::ServiceDiscovery;
+use protocol::application::{_impl::ServiceApplication, packets::ApplicationResponseErrorMessage};
 use tokio::runtime;
+use tokio::time;
 
 mod eth;
 
@@ -41,22 +44,34 @@ async fn _main() -> Result<()> {
         &sys_loop,
     );
 
-    let service_id = 2;
-    let timeout = 5;
+    let mut app = ServiceApplication::new(0x01);
+    app.init().await?;
 
-    let mut sd = ServiceDiscovery::new(service_id);
-    sd.init().await?;
-    sd.start().await?;
-    println!(
-        "Service Discovery started with ID: {}, Timeout: {}",
-        service_id, timeout
-    );
+    app.offer_method(
+        0x01,
+        Arc::new(|payload| {
+            println!("Received data: {:?}", payload);
+            if payload.is_empty() {
+                log::error!("Payload is empty");
+                return Err(ApplicationResponseErrorMessage {
+                    error_code: 0x01,
+                    error_message: "Payload is empty".to_string(),
+                });
+            }
 
-    std::thread::sleep(std::time::Duration::from_secs(timeout));
+            Ok(vec![])
+        }),
+    )
+    .await;
 
-    println!("Service Discovery finished after {} seconds", timeout);
+    app.offer_event(0x02).await;
 
-    Ok::<(), anyhow::Error>(())
+    app.start(false).await;
+
+    loop {
+        app.notify(0x02, vec![0xba, 0xbe, 0xef]).await;
+        time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn main() -> Result<()> {

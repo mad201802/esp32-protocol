@@ -277,14 +277,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Invalid ApplicationMessageType value")]
     fn test_invalid_message_type() {
-        ApplicationMessageType::from(0xFF);
+        let invalid_type = ApplicationMessageType::from(0xFF);
+        assert_eq!(invalid_type, ApplicationMessageType::INVALID);
     }
 
     #[test]
-    #[should_panic(expected = "Invalid ApplicationMessageReturnCode value")]
     fn test_invalid_return_code() {
-        ApplicationMessageReturnCode::from(0xFF);
+        let invalid_code = ApplicationMessageReturnCode::from(0xFF);
+        assert_eq!(invalid_code, ApplicationMessageReturnCode::INVALID);
     }
 }

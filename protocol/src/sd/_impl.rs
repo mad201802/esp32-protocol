@@ -24,13 +24,12 @@ struct ServiceEntry {
     last_seen: Instant,
 }
 
-#[derive(Clone)]
 pub struct ServiceDiscovery {
     service_id: u16,
     config: ServiceDiscoveryConfig,
     socket: Option<Arc<UdpSocket>>,
-    receiver_thread: Option<Arc<JoinHandle<()>>>,
-    send_thread: Option<Arc<JoinHandle<()>>>,
+    receiver_thread: Option<JoinHandle<()>>,
+    send_thread: Option<JoinHandle<()>>,
     server_running: Arc<AtomicBool>,
     services_mapping: Arc<Mutex<HashMap<u16, ServiceEntry>>>,
 }
@@ -171,7 +170,7 @@ impl ServiceDiscovery {
         
         // Pre-serialize the broadcast message to avoid repeated allocations
         let broadcast_message = ServiceDiscoveryMessage::OfferService(service_id);
-        let broadcast_bytes = broadcast_message.to_bytes();
+        let broadcast_bytes = broadcast_message.to_bytes_array();
 
         let send_thread = tokio::spawn({
             let socket = socket.clone();
@@ -193,8 +192,8 @@ impl ServiceDiscovery {
             socket
         );
 
-        self.receiver_thread = Some(Arc::new(receiver_thread));
-        self.send_thread = Some(Arc::new(send_thread));
+        self.receiver_thread = Some(receiver_thread);
+        self.send_thread = Some(send_thread);
         
         info!(
             "Service discovery started with ID: {} and socket: {:?}",
@@ -258,27 +257,19 @@ impl ServiceDiscovery {
 
         // Join receiver thread
         if let Some(receiver_thread) = self.receiver_thread.take() {
-            if let Ok(join_handle) = Arc::try_unwrap(receiver_thread) {
-                match timeout(self.config.socket_timeout, join_handle).await {
-                    Ok(Ok(())) => trace!("Receiver thread stopped gracefully"),
-                    Ok(Err(e)) => error!("Receiver thread panicked: {:?}", e),
-                    Err(_) => error!("Receiver thread did not stop within timeout"),
-                }
-            } else {
-                error!("Multiple references to receiver thread exist, cannot join cleanly");
+            match timeout(self.config.socket_timeout, receiver_thread).await {
+                Ok(Ok(())) => trace!("Receiver thread stopped gracefully"),
+                Ok(Err(e)) => error!("Receiver thread panicked: {:?}", e),
+                Err(_) => error!("Receiver thread did not stop within timeout"),
             }
         }
 
         // Join sender thread  
         if let Some(send_thread) = self.send_thread.take() {
-            if let Ok(join_handle) = Arc::try_unwrap(send_thread) {
-                match timeout(self.config.socket_timeout, join_handle).await {
-                    Ok(Ok(())) => trace!("Sender thread stopped gracefully"),
-                    Ok(Err(e)) => error!("Sender thread panicked: {:?}", e),
-                    Err(_) => error!("Sender thread did not stop within timeout"),
-                }
-            } else {
-                error!("Multiple references to sender thread exist, cannot join cleanly");
+            match timeout(self.config.socket_timeout, send_thread).await {
+                Ok(Ok(())) => trace!("Sender thread stopped gracefully"),
+                Ok(Err(e)) => error!("Sender thread panicked: {:?}", e),
+                Err(_) => error!("Sender thread did not stop within timeout"),
             }
         }
 
@@ -286,7 +277,7 @@ impl ServiceDiscovery {
         let multicast_addr = SocketAddrV4::new(self.config.multicast_addr, self.config.port);
         if let Some(socket) = &self.socket {
             let stop_message = ServiceDiscoveryMessage::StopOfferService(self.service_id);
-            let stop_bytes = stop_message.to_bytes();
+            let stop_bytes = stop_message.to_bytes_array();
             if let Err(e) = socket.send_to(&stop_bytes, multicast_addr).await {
                 error!("Failed to send stop message: {}", e);
             }

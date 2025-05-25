@@ -30,7 +30,6 @@ async fn _main() -> Result<()>{
     app.offer_event(0x02).await;
 
     app.start(false).await;
-    time::sleep(Duration::from_secs(2)).await;
 
     loop {
         app.notify(0x02, vec![0xba, 0xbe, 0xef]).await;

@@ -20,10 +20,11 @@ impl  ServiceDiscoveryMessage {
         }
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    /// Serialize to a fixed-size byte array to avoid heap allocation
+    pub fn to_bytes_array(&self) -> [u8; 3] {
         match self {
-            ServiceDiscoveryMessage::OfferService(id) => vec![0x01, (*id >> 8) as u8, *id as u8],
-            ServiceDiscoveryMessage::StopOfferService(id) => vec![0x02, (*id >> 8) as u8, *id as u8],
+            ServiceDiscoveryMessage::OfferService(id) => [0x01, (*id >> 8) as u8, *id as u8],
+            ServiceDiscoveryMessage::StopOfferService(id) => [0x02, (*id >> 8) as u8, *id as u8],
         }
     }
 }
@@ -34,8 +35,8 @@ mod tests {
     #[test]
     fn test_offer_service_to_bytes_and_from_bytes() {
         let msg = ServiceDiscoveryMessage::OfferService(0x1234);
-        let bytes = msg.to_bytes();
-        assert_eq!(bytes, vec![0x01, 0x12, 0x34]);
+        let bytes = msg.to_bytes_array();
+        assert_eq!(bytes, [0x01, 0x12, 0x34]);
         let parsed = ServiceDiscoveryMessage::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, msg);
     }
@@ -43,8 +44,8 @@ mod tests {
     #[test]
     fn test_stop_offer_service_to_bytes_and_from_bytes() {
         let msg = ServiceDiscoveryMessage::StopOfferService(0xABCD);
-        let bytes = msg.to_bytes();
-        assert_eq!(bytes, vec![0x02, 0xAB, 0xCD]);
+        let bytes = msg.to_bytes_array();
+        assert_eq!(bytes, [0x02, 0xAB, 0xCD]);
         let parsed = ServiceDiscoveryMessage::from_bytes(&bytes).unwrap();
         assert_eq!(parsed, msg);
     }
@@ -70,11 +71,11 @@ mod tests {
             let offer = ServiceDiscoveryMessage::OfferService(id);
             let stop = ServiceDiscoveryMessage::StopOfferService(id);
             assert_eq!(
-                ServiceDiscoveryMessage::from_bytes(&offer.to_bytes()).unwrap(),
+                ServiceDiscoveryMessage::from_bytes(&offer.to_bytes_array()).unwrap(),
                 offer
             );
             assert_eq!(
-                ServiceDiscoveryMessage::from_bytes(&stop.to_bytes()).unwrap(),
+                ServiceDiscoveryMessage::from_bytes(&stop.to_bytes_array()).unwrap(),
                 stop
             );
         }

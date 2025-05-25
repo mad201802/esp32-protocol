@@ -15,6 +15,22 @@ use log::{debug, error, info, trace};
 use parking_lot::Mutex;
 use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 
+// Constants for ESP32 optimization
+const MAX_CLIENTS: usize = 8;
+const MAX_SOCKETS: usize = 8;
+const MAX_OPEN_REQUESTS: usize = 16;
+const CHANNEL_BUFFER_SIZE: usize = 32;
+const CLIENT_BUFFER_SIZE: usize = 256;
+const TEMP_BUFFER_SIZE: usize = 256;
+const READ_TIMEOUT_MS: u64 = 100;
+const SLEEP_INTERVAL_MS: u64 = 10;
+const SUBSCRIPTION_TIMEOUT_MS: u64 = 1000;
+const CONNECTION_WAIT_MS: u64 = 500;
+
+// Error codes for consistent error handling
+const ERROR_CODE_EVENT_NOT_OFFERED: u8 = 0x02;
+const ERROR_CODE_METHOD_NOT_FOUND: u8 = 0x03;
+
 use crate::{
     application::packets::ApplicationResponseErrorMessage, 
     sd::ServiceDiscovery,
@@ -28,10 +44,6 @@ use super::{
         MethodInvokeCallback, MethodResponseCallback, OnEventInvokeCallback, RawMessageData,
     },
 };
-
-// Type alias for client-specific message channels
-type ClientMessageSender = Sender<ApplicationMessage>;
-
 pub struct ServiceApplication {
     service_id: u16,
     config: ServiceApplicationConfig,
@@ -40,7 +52,7 @@ pub struct ServiceApplication {
     connected_sockets: Arc<Mutex<HashSet<IpAddr>>>,
     
     // Key: IP Address, Value: Sender for that client
-    client_senders: Arc<Mutex<HashMap<IpAddr, ClientMessageSender>>>,
+    client_senders: Arc<Mutex<HashMap<IpAddr, Sender<ApplicationMessage>>>>,
 
     // Key: Method ID, Value: Callback
     offered_methods: HashMap<u16, MethodInvokeCallback>,
@@ -89,28 +101,37 @@ impl Clone for ServiceApplication {
 }
 
 impl ServiceApplication {
+    /// Creates a new ServiceApplication with default configuration
+    /// 
+    /// # Arguments
+    /// * `service_id` - Unique identifier for this service
     pub fn new(service_id: u16) -> Self {
         Self::with_config(service_id, ServiceApplicationConfig::default())
     }
 
+    /// Creates a new ServiceApplication with custom configuration
+    /// 
+    /// # Arguments
+    /// * `service_id` - Unique identifier for this service
+    /// * `config` - Service configuration parameters
     pub fn with_config(service_id: u16, config: ServiceApplicationConfig) -> Self {
         info!("Creating new service application with ID: {}", service_id);
 
-        let (message_process_tx, message_process_rx) = channel::bounded(32); // Use smaller bounded channel for ESP32
-        let (client_response_tx, client_response_rx) = channel::bounded(32); // Use smaller bounded channel for ESP32
+        let (message_process_tx, message_process_rx) = channel::bounded(CHANNEL_BUFFER_SIZE);
+        let (client_response_tx, client_response_rx) = channel::bounded(CHANNEL_BUFFER_SIZE);
 
         Self {
             service_id,
             config,
             service_discovery: None,
 
-            connected_sockets: Arc::new(Mutex::new(HashSet::with_capacity(8))), // Pre-allocate for ESP32
-            client_senders: Arc::new(Mutex::new(HashMap::with_capacity(8))), // Pre-allocate for ESP32
+            connected_sockets: Arc::new(Mutex::new(HashSet::with_capacity(MAX_SOCKETS))),
+            client_senders: Arc::new(Mutex::new(HashMap::with_capacity(MAX_CLIENTS))),
 
-            offered_events: Arc::new(Mutex::new(HashMap::with_capacity(8))), // Pre-allocate for ESP32
-            subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(8))), // Pre-allocate for ESP32
-            offered_methods: HashMap::with_capacity(8), // Pre-allocate for ESP32
-            open_requests: Arc::new(Mutex::new(HashMap::with_capacity(16))), // Pre-allocate for ESP32
+            offered_events: Arc::new(Mutex::new(HashMap::with_capacity(MAX_SOCKETS))),
+            subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(MAX_SOCKETS))),
+            offered_methods: HashMap::with_capacity(MAX_SOCKETS),
+            open_requests: Arc::new(Mutex::new(HashMap::with_capacity(MAX_OPEN_REQUESTS))),
 
             message_process_tx,
             message_process_rx: Some(message_process_rx),
@@ -148,27 +169,37 @@ impl ServiceApplication {
         trace!("Event {} offered", event_id);
     }
 
-    // Notifying all subscribing clients of an event
+    /// Notifies all subscribing clients of an event
+    /// 
+    /// # Arguments
+    /// * `event_id` - ID of the event to notify
+    /// * `payload` - Event data to send to subscribers
     pub fn notify(&self, event_id: u16, payload: Vec<u8>) {
         let offered_events = self.offered_events.lock();
-        if let Some(clients_to_offer) = offered_events.get(&event_id) {
-            for client_ip in clients_to_offer {
-                let mut notification_packet = ApplicationMessage::new(
+        if let Some(clients_to_notify) = offered_events.get(&event_id) {
+            if clients_to_notify.is_empty() {
+                debug!("No subscribers for event {}", event_id);
+                return;
+            }
+
+            for client_ip in clients_to_notify {
+                let notification_packet = ApplicationMessage::new(
                     self.service_id,
                     event_id,
                     Some(0),
                     ApplicationMessageType::Notification,
                     ApplicationMessageReturnCode::Ok,
-                    vec![],
+                    payload.clone(),
                 );
-                notification_packet.set_payload(payload.clone());
 
                 debug!("Notifying event {} to {:?}", event_id, client_ip);
 
                 if let Err(e) = self.client_response_tx.send((notification_packet, *client_ip)) {
-                    error!("Failed to send notification: {}", e);
+                    error!("Failed to send notification to {}: {}", client_ip, e);
                 }
             }
+        } else {
+            error!("Event {} is not offered", event_id);
         }
     }
 
@@ -188,7 +219,7 @@ impl ServiceApplication {
             }
         });
 
-        thread::sleep(Duration::from_millis(500)); // Wait for the client to be ready
+        thread::sleep(Duration::from_millis(CONNECTION_WAIT_MS)); // Wait for the client to be ready
         Ok(())
     }
 
@@ -236,6 +267,13 @@ impl ServiceApplication {
         Some(ip_addr)
     }
 
+    /// Calls a method on a remote service
+    /// 
+    /// # Arguments
+    /// * `service_id` - ID of the target service
+    /// * `method_id` - ID of the method to call
+    /// * `payload` - Method parameters
+    /// * `callback` - Function to handle the response
     pub fn call_method(
         &mut self,
         service_id: u16,
@@ -243,13 +281,15 @@ impl ServiceApplication {
         payload: Vec<u8>,
         callback: MethodResponseCallback,
     ) {
-        debug!("Calling method {} on {:?}", method_id, service_id);
+        debug!("Calling method {} on service {}", method_id, service_id);
 
-        let ip_addr = self.service_to_ip(service_id);
-        if ip_addr.is_none() {
-            error!("Could not find socket for service with ID: {}", service_id);
-            return;
-        }
+        let ip_addr = match self.service_to_ip(service_id) {
+            Some(addr) => addr,
+            None => {
+                error!("Could not find service with ID: {}", service_id);
+                return;
+            }
+        };
 
         let request_packet = ApplicationMessage::new(
             self.service_id,
@@ -261,13 +301,11 @@ impl ServiceApplication {
         );
 
         let request_id = request_packet.request_id;
-        match self
-            .client_response_tx
-            .send((request_packet, ip_addr.unwrap()))
-        {
+        match self.client_response_tx.send((request_packet, ip_addr)) {
             Ok(_) => {
                 let mut open_requests = self.open_requests.lock();
                 open_requests.insert(request_id, callback);
+                debug!("Sent method call request with ID: {}", request_id);
             }
             Err(err) => {
                 error!("Failed to send request packet: {:?}", err);
@@ -275,6 +313,16 @@ impl ServiceApplication {
         }
     }
 
+    /// Subscribes to an event from a remote service
+    /// 
+    /// This method will attempt to subscribe to an event with automatic retries.
+    /// The subscription process includes sending a subscription request and waiting
+    /// for confirmation from the remote service.
+    /// 
+    /// # Arguments
+    /// * `service_id` - ID of the service offering the event
+    /// * `event_id` - ID of the event to subscribe to
+    /// * `callback` - Function to handle event notifications
     pub fn subscribe(
         &mut self,
         service_id: u16,
@@ -283,90 +331,17 @@ impl ServiceApplication {
     ) {
         debug!("Subscribing to event {}", event_id);
 
-        let ip_addr = self.service_to_ip(service_id);
-        if ip_addr.is_none() {
-            error!("Could not find socket for service with ID: {}", service_id);
-            return;
-        }
+        let ip_addr = match self.service_to_ip(service_id) {
+            Some(addr) => addr,
+            None => {
+                error!("Could not find socket for service with ID: {}", service_id);
+                return;
+            }
+        };
 
-        let ip_addr = ip_addr.unwrap();
+        let subscription_successful = self.attempt_subscription(event_id, ip_addr);
 
-        // Retry mechanism for subscription
-        let subscription_successful = retry_with_delay_option_sync(
-            || {
-                let subscribe_packet = ApplicationMessage::new(
-                    self.service_id,
-                    event_id,
-                    None,
-                    ApplicationMessageType::Subscribe,
-                    ApplicationMessageReturnCode::Ok,
-                    vec![],
-                );
-
-                let request_id = subscribe_packet.request_id;
-                
-                // Send the subscription request
-                match self.client_response_tx.send((subscribe_packet, ip_addr)) {
-                    Ok(_) => {
-                        debug!("Sent subscription request for event {} with request_id {}", event_id, request_id);
-                        
-                        // Create a simple channel to wait for the response
-                        let (response_tx, response_rx) = channel::bounded(1);
-                        
-                        // Store the response sender in open_requests
-                        {
-                            let mut open_requests = self.open_requests.lock();
-                            open_requests.insert(request_id, Arc::new(move |result| {
-                                let _ = response_tx.try_send(result);
-                                Ok(vec![])
-                            }));
-                        }
-                        
-                        // Wait for response with timeout
-                        let timeout_duration = Duration::from_millis(1000);
-                        let start_time = Instant::now();
-                        
-                        loop {
-                            if start_time.elapsed() > timeout_duration {
-                                debug!("Subscription timeout for event {}, will retry", event_id);
-                                // Clean up the request from open_requests
-                                let mut open_requests = self.open_requests.lock();
-                                open_requests.remove(&request_id);
-                                return None;
-                            }
-                            
-                            match response_rx.try_recv() {
-                                Ok(Ok(_)) => {
-                                    debug!("Subscription confirmed for event {}", event_id);
-                                    return Some(());
-                                }
-                                Ok(Err(err)) => {
-                                    error!("Subscription failed for event {}: {:?}", event_id, err);
-                                    return None;
-                                }
-                                Err(TryRecvError::Empty) => {
-                                    thread::sleep(Duration::from_millis(10));
-                                    continue;
-                                }
-                                Err(TryRecvError::Disconnected) => {
-                                    error!("Subscription channel disconnected for event {}", event_id);
-                                    return None;
-                                }
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        error!("Failed to send subscribe packet: {:?}", err);
-                        None
-                    }
-                }
-            },
-            4,
-            500,
-        );
-
-        if subscription_successful.is_some() {
-            // Only add to subscribed events after successful confirmation
+        if subscription_successful {
             let mut subscribed_events = self.subscribed_events.lock();
             subscribed_events.insert(event_id, callback);
             debug!("Successfully subscribed to event {}", event_id);
@@ -375,133 +350,92 @@ impl ServiceApplication {
         }
     }
 
+    fn attempt_subscription(&self, event_id: u16, ip_addr: IpAddr) -> bool {
+        retry_with_delay_option_sync(
+            || self.send_subscription_request(event_id, ip_addr),
+            4,
+            500,
+        ).is_some()
+    }
+
+    fn send_subscription_request(&self, event_id: u16, ip_addr: IpAddr) -> Option<()> {
+        let subscribe_packet = ApplicationMessage::new(
+            self.service_id,
+            event_id,
+            None,
+            ApplicationMessageType::Subscribe,
+            ApplicationMessageReturnCode::Ok,
+            vec![],
+        );
+
+        let request_id = subscribe_packet.request_id;
+        
+        // Send the subscription request
+        if let Err(err) = self.client_response_tx.send((subscribe_packet, ip_addr)) {
+            error!("Failed to send subscribe packet: {:?}", err);
+            return None;
+        }
+
+        debug!("Sent subscription request for event {} with request_id {}", event_id, request_id);
+        
+        self.wait_for_subscription_response(request_id, event_id)
+    }
+
+    fn wait_for_subscription_response(&self, request_id: u16, event_id: u16) -> Option<()> {
+        let (response_tx, response_rx) = channel::bounded(1);
+        
+        // Store the response sender in open_requests
+        {
+            let mut open_requests = self.open_requests.lock();
+            open_requests.insert(request_id, Arc::new(move |result| {
+                let _ = response_tx.try_send(result);
+                Ok(vec![])
+            }));
+        }
+        
+        // Wait for response with timeout
+        let timeout_duration = Duration::from_millis(SUBSCRIPTION_TIMEOUT_MS);
+        let start_time = Instant::now();
+        
+        loop {
+            if start_time.elapsed() > timeout_duration {
+                debug!("Subscription timeout for event {}, will retry", event_id);
+                // Clean up the request from open_requests
+                let mut open_requests = self.open_requests.lock();
+                open_requests.remove(&request_id);
+                return None;
+            }
+            
+            match response_rx.try_recv() {
+                Ok(Ok(_)) => {
+                    debug!("Subscription confirmed for event {}", event_id);
+                    return Some(());
+                }
+                Ok(Err(err)) => {
+                    error!("Subscription failed for event {}: {:?}", event_id, err);
+                    return None;
+                }
+                Err(TryRecvError::Empty) => {
+                    thread::sleep(Duration::from_millis(SLEEP_INTERVAL_MS));
+                    continue;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    error!("Subscription channel disconnected for event {}", event_id);
+                    return None;
+                }
+            }
+        }
+    }
+
     fn handle_message_data_with_rx(&self, message_process_rx: Receiver<RawMessageData>) -> Result<()> {
         while self.server_running.load(Ordering::SeqCst) {
-            match message_process_rx.recv_timeout(Duration::from_millis(100)) {
+            match message_process_rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS)) {
                 Ok((packet, addr)) => {
-                    let mut response_packet = ApplicationMessage::new(
-                        packet.service_id,
-                        packet.method_id,
-                        Some(packet.request_id),
-                        ApplicationMessageType::Response,
-                        ApplicationMessageReturnCode::Ok,
-                        vec![],
-                    );
-
-                    match packet.message_type {
-                        ApplicationMessageType::Request => {
-                            debug!("Received request from {:?}", addr);
-
-                            if let Some(callback) = self.offered_methods.get(&packet.method_id) {
-                                let result = callback(packet.payload);
-                                response_packet = match result {
-                                    Ok(response_data) => {
-                                        response_packet.return_code = ApplicationMessageReturnCode::Ok;
-                                        response_packet.set_payload(response_data);
-                                        response_packet
-                                    }
-                                    Err(err) => {
-                                        error!("Error processing request: {:?}", err);
-                                        response_packet.return_code = ApplicationMessageReturnCode::Error;
-                                        response_packet.set_payload(err.to_bytes());
-                                        response_packet
-                                    }
-                                };
-                            }
-
-                            if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
-                                error!("Failed to send response: {}", e);
-                            }
-                        }
-                        ApplicationMessageType::Response => {
-                            trace!("Received Response Message: {:?}", packet);
-                            let mut open_requests = self.open_requests.lock();
-                            if let Some(request_callback) = open_requests.remove(&packet.request_id) {
-                                if packet.return_code == ApplicationMessageReturnCode::Ok {
-                                    let _result = request_callback(Ok(packet.payload));
-                                } else {
-                                    let error_message =
-                                        ApplicationResponseErrorMessage::from_bytes(&packet.payload)
-                                            .unwrap();
-                                    let _result = request_callback(Err(error_message));
-                                }
-                            }
-                        }
-                        ApplicationMessageType::Notification => {
-                            trace!("Received Notification Message: {:?}", packet);
-                            let subscribed_events = self.subscribed_events.lock();
-                            if let Some(callback) = subscribed_events.get(&packet.method_id) {
-                                callback(packet.payload);
-                            }
-                        }
-                        ApplicationMessageType::Subscribe => {
-                            // Handle Event Subscriptions
-                            let mut offered_events = self.offered_events.lock();
-                            if let Some(offered_events_clients) = offered_events.get_mut(&packet.method_id)
-                            {
-                                println!("!!! New event subscription: {:?}", packet.method_id);
-
-                                // Add the client to the event
-                                offered_events_clients.insert(addr);
-                                
-                                // Send a success response back to the client
-                                let response_packet = ApplicationMessage::new(
-                                    packet.service_id,
-                                    packet.method_id,
-                                    Some(packet.request_id),
-                                    ApplicationMessageType::Response,
-                                    ApplicationMessageReturnCode::Ok,
-                                    vec![],
-                                );
-                                
-                                if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
-                                    error!("Failed to send subscription response: {}", e);
-                                }
-                            } else {
-                                error!("Event {} not offered, rejecting subscription from {:?}", packet.method_id, addr);
-                                
-                                // Send an error response back to the client
-                                let error_message = ApplicationResponseErrorMessage::new(
-                                    0x02,
-                                    format!("Event {} not offered", packet.method_id),
-                                );
-                                
-                                let response_packet = ApplicationMessage::new(
-                                    packet.service_id,
-                                    packet.method_id,
-                                    Some(packet.request_id),
-                                    ApplicationMessageType::Response,
-                                    ApplicationMessageReturnCode::Error,
-                                    error_message.to_bytes(),
-                                );
-                                
-                                if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
-                                    error!("Failed to send error response: {}", e);
-                                }
-                            }
-                        }
-                        ApplicationMessageType::Unsubscribe => {
-                            trace!("Received Unsubscribe Message: {:?}", packet);
-                            let mut offered_events = self.offered_events.lock();
-                            if let Some(connected_clients) = offered_events.get_mut(&packet.method_id) {
-                                connected_clients.remove(&addr);
-                            }
-                        }
-                        ApplicationMessageType::SDFindService
-                        | ApplicationMessageType::SDOfferService
-                        | ApplicationMessageType::SDStopOfferService
-                        | ApplicationMessageType::INVALID => {
-                            error!(
-                                "Did not expect the following message: {:?}",
-                                packet.message_type
-                            );
-                        }
-                    }
-                },
+                    self.process_message(packet, addr);
+                }
                 Err(channel::RecvTimeoutError::Timeout) => {
-                    // Continue the loop on timeout
                     continue;
-                },
+                }
                 Err(channel::RecvTimeoutError::Disconnected) => {
                     info!("Message processing channel disconnected");
                     break;
@@ -511,72 +445,158 @@ impl ServiceApplication {
         Ok(())
     }
 
+    fn process_message(&self, packet: ApplicationMessage, addr: IpAddr) {
+        match packet.message_type {
+            ApplicationMessageType::Request => self.handle_request(packet, addr),
+            ApplicationMessageType::Response => self.handle_response(packet),
+            ApplicationMessageType::Notification => self.handle_notification(packet),
+            ApplicationMessageType::Subscribe => self.handle_subscription(packet, addr),
+            ApplicationMessageType::Unsubscribe => self.handle_unsubscription(packet, addr),
+            ApplicationMessageType::SDFindService
+            | ApplicationMessageType::SDOfferService
+            | ApplicationMessageType::SDStopOfferService
+            | ApplicationMessageType::INVALID => {
+                error!("Unexpected message type: {:?}", packet.message_type);
+            }
+        }
+    }
+
+    fn handle_request(&self, packet: ApplicationMessage, addr: IpAddr) {
+        debug!("Received request from {:?}", addr);
+
+        let response_packet = if let Some(callback) = self.offered_methods.get(&packet.method_id) {
+            match callback(packet.payload) {
+                Ok(response_data) => {
+                    self.create_response_packet(
+                        packet.service_id,
+                        packet.method_id,
+                        packet.request_id,
+                        response_data,
+                    )
+                }
+                Err(err) => {
+                    error!("Error processing request: {:?}", err);
+                    ApplicationMessage::new(
+                        packet.service_id,
+                        packet.method_id,
+                        Some(packet.request_id),
+                        ApplicationMessageType::Response,
+                        ApplicationMessageReturnCode::Error,
+                        err.to_bytes(),
+                    )
+                }
+            }
+        } else {
+            error!("Method {} not found", packet.method_id);
+            self.create_error_response_packet(
+                packet.service_id,
+                packet.method_id,
+                packet.request_id,
+                ERROR_CODE_METHOD_NOT_FOUND,
+                format!("Method {} not found", packet.method_id),
+            )
+        };
+
+        if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
+            error!("Failed to send response: {}", e);
+        }
+    }
+
+    fn handle_response(&self, packet: ApplicationMessage) {
+        trace!("Received Response Message: {:?}", packet);
+        let mut open_requests = self.open_requests.lock();
+        if let Some(request_callback) = open_requests.remove(&packet.request_id) {
+            if packet.return_code == ApplicationMessageReturnCode::Ok {
+                let _result = request_callback(Ok(packet.payload));
+            } else {
+                let error_message = ApplicationResponseErrorMessage::from_bytes(&packet.payload)
+                    .unwrap();
+                let _result = request_callback(Err(error_message));
+            }
+        }
+    }
+
+    fn handle_notification(&self, packet: ApplicationMessage) {
+        trace!("Received Notification Message: {:?}", packet);
+        let subscribed_events = self.subscribed_events.lock();
+        if let Some(callback) = subscribed_events.get(&packet.method_id) {
+            callback(packet.payload);
+        }
+    }
+
+    fn handle_subscription(&self, packet: ApplicationMessage, addr: IpAddr) {
+        let mut offered_events = self.offered_events.lock();
+        if let Some(offered_events_clients) = offered_events.get_mut(&packet.method_id) {
+            debug!("New event subscription: {:?}", packet.method_id);
+
+            offered_events_clients.insert(addr);
+            
+            let response_packet = self.create_response_packet(
+                packet.service_id,
+                packet.method_id,
+                packet.request_id,
+                vec![],
+            );
+            
+            if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
+                error!("Failed to send subscription response: {}", e);
+            }
+        } else {
+            error!("Event {} not offered, rejecting subscription from {:?}", packet.method_id, addr);
+            
+            let response_packet = self.create_error_response_packet(
+                packet.service_id,
+                packet.method_id,
+                packet.request_id,
+                ERROR_CODE_EVENT_NOT_OFFERED,
+                format!("Event {} not offered", packet.method_id),
+            );
+            
+            if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
+                error!("Failed to send error response: {}", e);
+            }
+        }
+    }
+
+    fn handle_unsubscription(&self, packet: ApplicationMessage, addr: IpAddr) {
+        trace!("Received Unsubscribe Message: {:?}", packet);
+        let mut offered_events = self.offered_events.lock();
+        if let Some(connected_clients) = offered_events.get_mut(&packet.method_id) {
+            connected_clients.remove(&addr);
+        }
+    }
+
     /// Handle incoming client connections and messages
-    fn handle_client(
-        &self,
-        mut tcp_stream: TcpStream,
-    ) -> Result<()> {
+    fn handle_client(&self, mut tcp_stream: TcpStream) -> Result<()> {
         let socket_addr = tcp_stream.peer_addr()?;
         info!("Handling client connection from {:?}", socket_addr);
 
-        // Set non-blocking mode for the stream
         tcp_stream.set_nonblocking(true)?;
 
-        // Create a channel for this specific client's outgoing messages
         let (this_client_tx, this_client_rx) = channel::unbounded::<ApplicationMessage>();
         
-        // Register this client's sender
-        {
-            let mut client_senders = self.client_senders.lock();
-            client_senders.insert(socket_addr.ip(), this_client_tx);
-        }
+        // Register this client with capacity checks
+        self.register_client(socket_addr.ip(), this_client_tx)?;
 
-        {
-            let mut connected_sockets = self.connected_sockets.lock();
-            connected_sockets.insert(socket_addr.ip());
-        }
-
-        let mut buffer: Vec<u8> = Vec::with_capacity(512); // Pre-allocate with smaller capacity for ESP32
-        let mut temp_buffer = [0u8; 512]; // Reduce buffer size for ESP32
+        let mut buffer: Vec<u8> = Vec::with_capacity(CLIENT_BUFFER_SIZE);
+        let mut temp_buffer = [0u8; TEMP_BUFFER_SIZE];
 
         loop {
             if !self.server_running.load(Ordering::SeqCst) {
                 break;
             }
 
-            // Try to read from socket
+            // Handle incoming data
             match tcp_stream.read(&mut temp_buffer) {
                 Ok(0) => {
                     info!("[Disconnected] {:?}", socket_addr);
-                    {
-                        let mut connected_sockets = self.connected_sockets.lock();
-                        connected_sockets.remove(&socket_addr.ip());
-
-                        let mut client_senders = self.client_senders.lock();
-                        client_senders.remove(&socket_addr.ip());
-
-                        let mut offered_events = self.offered_events.lock();
-                        for (_, connected_clients) in offered_events.iter_mut() {
-                            connected_clients.remove(&socket_addr.ip());
-                        }
-                    }
+                    self.unregister_client(socket_addr.ip());
                     break;
                 }
                 Ok(bytes_read) => {
-                    buffer.extend_from_slice(&temp_buffer[..bytes_read]);
-                    
-                    match ApplicationMessage::from_bytes(&buffer.clone()) {
-                        Ok(packet) => {
-                            if let Err(e) = self.message_process_tx.send((packet, socket_addr.ip())) {
-                                error!("Failed to send message to processing queue: {}", e);
-                                break;
-                            }
-                            buffer.clear();
-                        },
-                        Err(err) => {
-                            error!("Error deserializing packet: {:?}", err);
-                            buffer.clear();
-                        }
+                    if let Err(e) = self.process_incoming_data(&mut buffer, &temp_buffer[..bytes_read], socket_addr.ip()) {
+                        error!("Error processing incoming data: {}", e);
+                        buffer.clear();
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -588,155 +608,88 @@ impl ServiceApplication {
                 }
             }
 
-            // Check for messages to send to this specific client
-            match this_client_rx.try_recv() {
-                Ok(msg) => {
-                    trace!("Sending message to {:?}:{:?}", socket_addr, msg);
-
-                    match ApplicationMessage::to_bytes(&msg) {
-                        Ok(packet) => {
-                            if let Err(e) = tcp_stream.write_all(&packet) {
-                                error!("Failed to write to socket: {}", e);
-                                break;
-                            }
-                        },
-                        Err(err) => {
-                            error!("Error serializing packet: {:?}", err);
-                        }
-                    }
-                },
-                Err(TryRecvError::Empty) => {
-                    // No messages to send
-                },
-                Err(TryRecvError::Disconnected) => {
-                    info!("Client message channel disconnected");
-                    break;
-                }
+            // Handle outgoing messages
+            if let Err(e) = self.process_outgoing_messages(&mut tcp_stream, &this_client_rx, socket_addr) {
+                error!("Error processing outgoing messages: {}", e);
+                break;
             }
 
-            // Sleep briefly to prevent busy loop
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(SLEEP_INTERVAL_MS));
         }
         Ok(())
     }
 
-    /// Static method to handle incoming client connections without cloning the entire struct
-    fn handle_client_static(
-        mut tcp_stream: TcpStream,
-        connected_sockets: Arc<Mutex<HashSet<IpAddr>>>,
-        client_senders: Arc<Mutex<HashMap<IpAddr, ClientMessageSender>>>,
-        offered_events: Arc<Mutex<HashMap<u16, HashSet<IpAddr>>>>,
-        message_process_tx: Sender<RawMessageData>,
-        server_running: Arc<AtomicBool>,
-    ) -> Result<()> {
-        let socket_addr = tcp_stream.peer_addr()?;
-        info!("Handling client connection from {:?}", socket_addr);
-
-        // Set non-blocking mode for the stream
-        tcp_stream.set_nonblocking(true)?;
-
-        // Create a channel for this specific client's outgoing messages
-        let (this_client_tx, this_client_rx) = channel::unbounded::<ApplicationMessage>();
-        
-        // Register this client's sender with error handling
+    fn register_client(&self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
         {
-            let mut client_senders_guard = client_senders.lock();
-            if client_senders_guard.len() >= 8 {
-                error!("Maximum client connections reached, rejecting new connection");
+            let mut client_senders = self.client_senders.lock();
+            if client_senders.len() >= MAX_CLIENTS {
                 return Err(anyhow::anyhow!("Maximum client connections reached"));
             }
-            client_senders_guard.insert(socket_addr.ip(), this_client_tx);
+            client_senders.insert(ip, sender);
         }
 
         {
-            let mut connected_sockets_guard = connected_sockets.lock();
-            if connected_sockets_guard.len() >= 8 {
-                error!("Maximum socket connections reached");
+            let mut connected_sockets = self.connected_sockets.lock();
+            if connected_sockets.len() >= MAX_SOCKETS {
                 return Err(anyhow::anyhow!("Maximum socket connections reached"));
             }
-            connected_sockets_guard.insert(socket_addr.ip());
+            connected_sockets.insert(ip);
         }
 
-        let mut buffer: Vec<u8> = Vec::with_capacity(256); // Smaller capacity for ESP32
-        let mut temp_buffer = [0u8; 256]; // Smaller buffer size for ESP32
+        Ok(())
+    }
 
-        loop {
-            if !server_running.load(Ordering::SeqCst) {
-                break;
+    fn unregister_client(&self, ip: IpAddr) {
+        let mut connected_sockets = self.connected_sockets.lock();
+        connected_sockets.remove(&ip);
+
+        let mut client_senders = self.client_senders.lock();
+        client_senders.remove(&ip);
+
+        let mut offered_events = self.offered_events.lock();
+        for (_, connected_clients) in offered_events.iter_mut() {
+            connected_clients.remove(&ip);
+        }
+    }
+
+    fn process_incoming_data(&self, buffer: &mut Vec<u8>, data: &[u8], ip: IpAddr) -> Result<()> {
+        buffer.extend_from_slice(data);
+        
+        match ApplicationMessage::from_bytes(buffer) {
+            Ok(packet) => {
+                self.message_process_tx.send((packet, ip))?;
+                buffer.clear();
             }
-
-            // Try to read from socket
-            match tcp_stream.read(&mut temp_buffer) {
-                Ok(0) => {
-                    info!("[Disconnected] {:?}", socket_addr);
-                    {
-                        let mut connected_sockets_guard = connected_sockets.lock();
-                        connected_sockets_guard.remove(&socket_addr.ip());
-
-                        let mut client_senders_guard = client_senders.lock();
-                        client_senders_guard.remove(&socket_addr.ip());
-
-                        let mut offered_events_guard = offered_events.lock();
-                        for (_, connected_clients) in offered_events_guard.iter_mut() {
-                            connected_clients.remove(&socket_addr.ip());
-                        }
-                    }
-                    break;
-                }
-                Ok(bytes_read) => {
-                    buffer.extend_from_slice(&temp_buffer[..bytes_read]);
-                    
-                    match ApplicationMessage::from_bytes(&buffer.clone()) {
-                        Ok(packet) => {
-                            if let Err(e) = message_process_tx.send((packet, socket_addr.ip())) {
-                                error!("Failed to send message to processing queue: {}", e);
-                                break;
-                            }
-                            buffer.clear();
-                        },
-                        Err(err) => {
-                            error!("Error deserializing packet: {:?}", err);
-                            buffer.clear();
-                        }
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data available, check for outgoing messages
-                }
-                Err(e) => {
-                    error!("Failed to read from socket: {}", e);
-                    break;
+            Err(_) => {
+                // Packet might be incomplete, keep the data for next iteration
+                // Clear buffer if it gets too large to prevent memory issues
+                if buffer.len() > CLIENT_BUFFER_SIZE * 2 {
+                    buffer.clear();
+                    return Err(anyhow::anyhow!("Buffer overflow, clearing"));
                 }
             }
+        }
+        Ok(())
+    }
 
-            // Check for messages to send to this specific client
-            match this_client_rx.try_recv() {
-                Ok(msg) => {
-                    trace!("Sending message to {:?}:{:?}", socket_addr, msg);
-
-                    match ApplicationMessage::to_bytes(&msg) {
-                        Ok(packet) => {
-                            if let Err(e) = tcp_stream.write_all(&packet) {
-                                error!("Failed to write to socket: {}", e);
-                                break;
-                            }
-                        },
-                        Err(err) => {
-                            error!("Error serializing packet: {:?}", err);
-                        }
-                    }
-                },
-                Err(TryRecvError::Empty) => {
-                    // No messages to send
-                },
-                Err(TryRecvError::Disconnected) => {
-                    info!("Client message channel disconnected");
-                    break;
-                }
+    fn process_outgoing_messages(
+        &self, 
+        tcp_stream: &mut TcpStream, 
+        client_rx: &Receiver<ApplicationMessage>,
+        socket_addr: SocketAddr
+    ) -> Result<()> {
+        match client_rx.try_recv() {
+            Ok(msg) => {
+                trace!("Sending message to {:?}:{:?}", socket_addr, msg);
+                let packet = ApplicationMessage::to_bytes(&msg)?;
+                tcp_stream.write_all(&packet)?;
             }
-
-            // Sleep briefly to prevent busy loop
-            thread::sleep(Duration::from_millis(10));
+            Err(TryRecvError::Empty) => {
+                // No messages to send
+            }
+            Err(TryRecvError::Disconnected) => {
+                return Err(anyhow::anyhow!("Client message channel disconnected"));
+            }
         }
         Ok(())
     }
@@ -763,29 +716,15 @@ impl ServiceApplication {
                     });
                     info!("[Connected] {:?}", addr);
 
-                    // Instead of cloning the entire struct, only clone what we need
-                    let connected_sockets = Arc::clone(&self.connected_sockets);
-                    let client_senders = Arc::clone(&self.client_senders);
-                    let offered_events = Arc::clone(&self.offered_events);
-                    let message_process_tx = self.message_process_tx.clone();
-                    let server_running = Arc::clone(&self.server_running);
-                    
+                    let server = Arc::new(self.clone());
                     thread::spawn(move || {
-                        if let Err(e) = Self::handle_client_static(
-                            socket,
-                            connected_sockets,
-                            client_senders,
-                            offered_events,
-                            message_process_tx,
-                            server_running,
-                        ) {
+                        if let Err(e) = server.handle_client(socket) {
                             error!("Client handler error: {}", e);
                         }
                     });
                 }
                 Err(e) => {
                     error!("Failed to accept connection: {}", e);
-                    // Continue listening despite individual connection failures
                 }
             }
         }
@@ -795,7 +734,7 @@ impl ServiceApplication {
     /// Message distributor that forwards messages from the global response channel to client-specific channels
     fn message_distributor(&self, client_response_rx: Receiver<RawMessageData>) -> Result<()> {
         while self.server_running.load(Ordering::SeqCst) {
-            match client_response_rx.recv_timeout(Duration::from_millis(100)) {
+            match client_response_rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS)) {
                 Ok((msg, target_addr)) => {
                     let client_senders = self.client_senders.lock();
                     if let Some(client_sender) = client_senders.get(&target_addr) {
@@ -805,11 +744,10 @@ impl ServiceApplication {
                     } else {
                         debug!("No client found for address: {}", target_addr);
                     }
-                },
+                }
                 Err(channel::RecvTimeoutError::Timeout) => {
-                    // Continue the loop on timeout
                     continue;
-                },
+                }
                 Err(channel::RecvTimeoutError::Disconnected) => {
                     info!("Message distributor channel disconnected");
                     break;
@@ -919,5 +857,45 @@ impl ServiceApplication {
         
         info!("Service application shutdown complete");
         Ok(())
+    }
+
+    /// Helper method to create a success response packet
+    fn create_response_packet(
+        &self,
+        service_id: u16,
+        method_id: u16,
+        request_id: u16,
+        payload: Vec<u8>,
+    ) -> ApplicationMessage {
+        let mut packet = ApplicationMessage::new(
+            service_id,
+            method_id,
+            Some(request_id),
+            ApplicationMessageType::Response,
+            ApplicationMessageReturnCode::Ok,
+            vec![],
+        );
+        packet.set_payload(payload);
+        packet
+    }
+
+    /// Helper method to create an error response packet
+    fn create_error_response_packet(
+        &self,
+        service_id: u16,
+        method_id: u16,
+        request_id: u16,
+        error_code: u8,
+        error_message: String,
+    ) -> ApplicationMessage {
+        let error = ApplicationResponseErrorMessage::new(error_code, error_message);
+        ApplicationMessage::new(
+            service_id,
+            method_id,
+            Some(request_id),
+            ApplicationMessageType::Response,
+            ApplicationMessageReturnCode::Error,
+            error.to_bytes(),
+        )
     }
 }

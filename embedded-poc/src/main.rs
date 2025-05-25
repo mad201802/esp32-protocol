@@ -1,18 +1,30 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::thread;
 
 use anyhow::Result;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use esp_idf_sys::esp;
 use eth::start_eth;
-use protocol::application::{_impl::ServiceApplication, packets::ApplicationResponseErrorMessage};
-use tokio::runtime;
-use tokio::time;
+use protocol::application::{_impl_sync::ServiceApplication, packets::ApplicationResponseErrorMessage};
 
 mod eth;
 
-async fn _main() -> Result<()> {
+fn main() -> Result<()> {
+    // It is necessary to call this function once. Otherwise some patches to the runtime
+    // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
+    esp_idf_svc::sys::link_patches();
+
+    // Bind the log crate to the ESP Logging facilities
+    esp_idf_svc::log::EspLogger::initialize_default();
+
+    let config = esp_idf_sys::esp_vfs_eventfd_config_t {
+        max_fds: 1,
+        ..Default::default()
+    };
+    esp! { unsafe { esp_idf_sys::esp_vfs_eventfd_register(&config) } }?;
+
     let p = Peripherals::take()?;
     let pins = p.pins;
     let sys_loop = EspSystemEventLoop::take()?;
@@ -45,7 +57,7 @@ async fn _main() -> Result<()> {
     );
 
     let mut app = ServiceApplication::new(0x01);
-    app.init().await?;
+    app.init()?;
 
     app.offer_method(
         0x01,
@@ -61,37 +73,15 @@ async fn _main() -> Result<()> {
 
             Ok(vec![])
         }),
-    )
-    .await;
+    );
 
-    app.offer_event(0x02).await;
+    app.offer_event(0x02);
 
-    app.start(false).await;
+    app.start(false)?;
 
     loop {
-        app.notify(0x02, vec![0xba, 0xbe, 0xef]).await;
-        time::sleep(Duration::from_millis(100)).await;
+        // Use smaller allocations for ESP32
+        app.notify(0x02, vec![0xba, 0xbe, 0xef]);
+        thread::sleep(Duration::from_millis(500)); // Reduce frequency to prevent memory pressure
     }
-}
-
-fn main() -> Result<()> {
-    // It is necessary to call this function once. Otherwise some patches to the runtime
-    // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
-    esp_idf_svc::sys::link_patches();
-
-    // Bind the log crate to the ESP Logging facilities
-    esp_idf_svc::log::EspLogger::initialize_default();
-
-    let config = esp_idf_sys::esp_vfs_eventfd_config_t {
-        max_fds: 1,
-        ..Default::default()
-    };
-    esp! { unsafe { esp_idf_sys::esp_vfs_eventfd_register(&config) } }?;
-
-    runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?
-        .block_on(_main())?;
-
-    Ok(())
 }

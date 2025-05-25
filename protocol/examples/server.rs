@@ -1,14 +1,13 @@
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration, thread};
 
 use anyhow::Result;
-use protocol::application::{_impl::ServiceApplication, packets::ApplicationResponseErrorMessage};
-use tokio::{runtime::Runtime, time};
+use protocol::application::{_impl_sync::ServiceApplication, packets::ApplicationResponseErrorMessage};
 
-async fn _main() -> Result<()>{
+fn main() -> Result<()> {
     env_logger::init();
 
     let mut app = ServiceApplication::new(0x01);
-    app.init().await?;
+    app.init()?;
 
     app.offer_method(
         0x01,
@@ -24,23 +23,15 @@ async fn _main() -> Result<()>{
 
             Ok(vec![])
         }),
-    )
-    .await;
+    );
 
-    app.offer_event(0x02).await;
+    app.offer_event(0x02);
+    app.offer_event(0x03);
 
-    app.start(false).await;
+    app.start(false)?;
 
     loop {
-        app.notify(0x02, vec![0xba, 0xbe, 0xef]).await;
-        time::sleep(Duration::from_millis(100)).await;
+        app.notify(0x02, vec![0xff; 32]);
+        thread::sleep(Duration::from_millis(100));
     }
-}
-
-fn main() -> Result<()> {
-    let rt  = Runtime::new()?;
-
-    rt.block_on(async {
-        _main().await
-    })
 }

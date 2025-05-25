@@ -1,19 +1,16 @@
-use std::{sync::Arc};
+use std::{sync::Arc, time::Duration, thread};
 
 use anyhow::Result;
-use protocol::{
-    application::{_impl::ServiceApplication},
-};
-use tokio::{runtime::Runtime, time};
+use protocol::application::_impl_sync::ServiceApplication;
 
-async fn _main() -> Result<()> {
+fn main() -> Result<()> {
     env_logger::init();
 
     let mut app = ServiceApplication::new(0x02);
-    app.init().await?;
-    app.start(false).await;
+    app.init()?;
+    app.start(false)?;
 
-    time::sleep(time::Duration::from_secs(2)).await;
+    thread::sleep(Duration::from_secs(2));
 
     println!("Calling method...");
     app.call_method(
@@ -32,19 +29,17 @@ async fn _main() -> Result<()> {
 
             Ok(vec![])
         }),
-    ).await;
+    );
 
     app.subscribe(0x01, 0x02, Arc::new(|data| {
         println!("Received event data: {:?}", data);
-    })).await;
+    }));
+
+    app.subscribe(0x01, 0x03, Arc::new(|data| {
+        println!("Received event data: {:?}", data);
+    }));
 
     loop {
-        time::sleep(time::Duration::from_secs(1)).await;
+        thread::sleep(Duration::from_secs(1));
     }
-}
-
-fn main() -> Result<()> {
-    let rt = Runtime::new()?;
-
-    rt.block_on(async { _main().await })
 }

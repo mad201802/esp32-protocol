@@ -1,23 +1,23 @@
 services:
   server:
     container_name: server
-    image: ubuntu:22.04
-    volumes:
-      - ./target/debug/examples:/app/examples
+    build:
+      args:
+        TARGET: server
     environment:
       - RUST_LOG=debug
-    command: /app/examples/server
+    stop_grace_period: 1s
     networks:
       - development
     
   client:
     container_name: client
-    image: ubuntu:22.04
-    volumes:
-      - ./target/debug/examples:/app/examples
+    build:
+      args:
+        TARGET: client
     environment:
       - RUST_LOG=debug
-    command: /app/examples/client
+    stop_grace_period: 1s
     networks:
       - development
     depends_on:

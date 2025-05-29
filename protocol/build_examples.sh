@@ -1,1 +1,0 @@
-docker run --rm --user 1000 -v "$PWD":/usr/src/protocol -w /usr/src/protocol rust:1.86.0-slim sh -c "cargo build --example client && cargo build --example server"

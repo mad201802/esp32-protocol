@@ -33,7 +33,7 @@ const ERROR_CODE_METHOD_NOT_FOUND: u8 = 0x03;
 
 use crate::{
     application::packets::ApplicationResponseErrorMessage, 
-    sd::ServiceDiscovery,
+    sd::{ServiceDiscovery, ServiceDiscoveryInterface},
     utils::retry_with_delay_option_sync,
 };
 
@@ -47,7 +47,7 @@ use super::{
 pub struct ServiceApplication {
     service_id: u16,
     config: ServiceApplicationConfig,
-    service_discovery: Option<ServiceDiscovery>,
+    service_discovery: Option<Box<dyn ServiceDiscoveryInterface>>,
 
     connected_sockets: Arc<Mutex<HashSet<IpAddr>>>,
     
@@ -150,8 +150,18 @@ impl ServiceApplication {
         // Initialize the service discovery component
         let mut service_discovery = ServiceDiscovery::new(self.service_id);
         service_discovery.init()?;
-        self.service_discovery = Some(service_discovery);
+        self.service_discovery = Some(Box::new(service_discovery));
 
+        Ok(())
+    }
+
+    /// Initialize the application with a custom service discovery implementation
+    /// 
+    /// # Arguments
+    /// * `service_discovery` - A custom service discovery implementation
+    pub fn init_with_discovery(&mut self, mut service_discovery: Box<dyn ServiceDiscoveryInterface>) -> Result<()> {
+        service_discovery.init()?;
+        self.service_discovery = Some(service_discovery);
         Ok(())
     }
 
@@ -228,7 +238,7 @@ impl ServiceApplication {
 
         trace!("Finding service with ID: {}", service_id);
 
-        let service_discovery = self.service_discovery.as_mut().unwrap();
+        let service_discovery = self.service_discovery.as_ref().unwrap();
         let ip_addr = retry_with_delay_option_sync(
             || service_discovery.find_service(service_id),
             4,

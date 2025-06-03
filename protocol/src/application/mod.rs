@@ -1,5 +1,5 @@
 pub mod _impl_sync;
-pub mod packets;
+pub mod message;
 pub mod config;
 pub mod error;
 

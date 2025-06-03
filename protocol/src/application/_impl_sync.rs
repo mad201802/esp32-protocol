@@ -32,14 +32,14 @@ const ERROR_CODE_EVENT_NOT_OFFERED: u8 = 0x02;
 const ERROR_CODE_METHOD_NOT_FOUND: u8 = 0x03;
 
 use crate::{
-    application::packets::ApplicationResponseErrorMessage, 
+    application::message::ApplicationResponseErrorMessage, 
     sd::{ServiceDiscovery, ServiceDiscoveryInterface},
     utils::retry_with_delay_option_sync,
 };
 
 use super::{
     config::ServiceApplicationConfig,
-    packets::{
+    message::{
         ApplicationMessage, ApplicationMessageReturnCode, ApplicationMessageType,
         MethodInvokeCallback, MethodResponseCallback, OnEventInvokeCallback, RawMessageData,
     },

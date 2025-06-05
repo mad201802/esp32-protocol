@@ -376,12 +376,4 @@ impl TcpConnectionPool {
         }
         Ok(())
     }
-    
-    /// Remove a client from all event subscriptions (called from ServiceApplication)
-    pub fn remove_from_events(&self, ip: IpAddr, offered_events: &Arc<Mutex<HashMap<u16, HashSet<IpAddr>>>>) {
-        let mut offered_events = offered_events.lock();
-        for (_, connected_clients) in offered_events.iter_mut() {
-            connected_clients.remove(&ip);
-        }
-    }
 }

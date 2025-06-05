@@ -33,10 +33,12 @@ pub struct TcpConnectionPool {
     /// Map of client IP addresses to their message senders
     client_senders: Arc<Mutex<HashMap<IpAddr, Sender<ApplicationMessage>>>>,
     
-    /// Channel for incoming messages from clients
+    /// Channel for incoming messages from clients (sent to ServiceApplication)
     message_process_tx: Sender<RawMessageData>,
+    message_process_rx: Option<Receiver<RawMessageData>>,
     
-    /// Channel for outgoing messages to clients
+    /// Channel for outgoing messages to clients (received from ServiceApplication)
+    client_response_tx: Sender<RawMessageData>,
     client_response_rx: Option<Receiver<RawMessageData>>,
     
     /// Server configuration
@@ -51,16 +53,16 @@ pub struct TcpConnectionPool {
 
 impl TcpConnectionPool {
     /// Create a new TCP connection pool
-    pub fn new(
-        bind_addr: IpAddr,
-        port: u16,
-        message_process_tx: Sender<RawMessageData>,
-        client_response_rx: Receiver<RawMessageData>,
-    ) -> Self {
+    pub fn new(bind_addr: IpAddr, port: u16) -> Self {
+        let (message_process_tx, message_process_rx) = channel::bounded(32);
+        let (client_response_tx, client_response_rx) = channel::bounded(32);
+        
         Self {
             connected_sockets: Arc::new(Mutex::new(HashSet::with_capacity(MAX_SOCKETS))),
             client_senders: Arc::new(Mutex::new(HashMap::with_capacity(MAX_CLIENTS))),
             message_process_tx,
+            message_process_rx: Some(message_process_rx),
+            client_response_tx,
             client_response_rx: Some(client_response_rx),
             bind_addr,
             port,
@@ -68,6 +70,16 @@ impl TcpConnectionPool {
             server_thread: None,
             message_distributor_thread: None,
         }
+    }
+    
+    /// Get the message processing receiver (used by ServiceApplication)
+    pub fn take_message_receiver(&mut self) -> Option<Receiver<RawMessageData>> {
+        self.message_process_rx.take()
+    }
+    
+    /// Get the client response sender (used by ServiceApplication)
+    pub fn get_response_sender(&self) -> Sender<RawMessageData> {
+        self.client_response_tx.clone()
     }
     
     /// Start the TCP server and message distributor
@@ -163,6 +175,8 @@ impl TcpConnectionPool {
             connected_sockets: Arc::clone(&self.connected_sockets),
             client_senders: Arc::clone(&self.client_senders),
             message_process_tx: self.message_process_tx.clone(),
+            message_process_rx: None,
+            client_response_tx: self.client_response_tx.clone(),
             client_response_rx: None,
             bind_addr: self.bind_addr,
             port: self.port,

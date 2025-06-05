@@ -12,11 +12,10 @@ use std::{
 use anyhow::Result;
 use log::{debug, error, info, trace};
 use parking_lot::Mutex;
-use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
+use crossbeam::channel::{self, Receiver, TryRecvError};
 
 // Constants for ESP32 optimization
 const MAX_OPEN_REQUESTS: usize = 16;
-const CHANNEL_BUFFER_SIZE: usize = 32;
 const SUBSCRIPTION_TIMEOUT_MS: u64 = 1000;
 const SLEEP_INTERVAL_MS: u64 = 10;
 
@@ -56,11 +55,6 @@ pub struct ServiceApplication {
     // Key: Request ID, Value: Callback
     open_requests: Arc<Mutex<HashMap<u16, MethodResponseCallback>>>,
 
-    message_process_tx: Sender<RawMessageData>,
-    message_process_rx: Option<Receiver<RawMessageData>>,
-    client_response_tx: Sender<RawMessageData>,
-    client_response_rx: Option<Receiver<RawMessageData>>,
-
     // Server thread handle
     message_handler_thread: Option<JoinHandle<()>>,
     server_running: Arc<AtomicBool>,
@@ -77,10 +71,6 @@ impl Clone for ServiceApplication {
             offered_events: Arc::clone(&self.offered_events),
             subscribed_events: Arc::clone(&self.subscribed_events),
             open_requests: Arc::clone(&self.open_requests),
-            message_process_tx: self.message_process_tx.clone(),
-            message_process_rx: None, // Don't clone receivers to avoid conflicts
-            client_response_tx: self.client_response_tx.clone(),
-            client_response_rx: None, // Don't clone receivers to avoid conflicts
             message_handler_thread: None,
             server_running: Arc::clone(&self.server_running),
         }
@@ -104,9 +94,6 @@ impl ServiceApplication {
     pub fn with_config(service_id: u16, config: ServiceApplicationConfig) -> Self {
         info!("Creating new service application with ID: {}", service_id);
 
-        let (message_process_tx, message_process_rx) = channel::bounded(CHANNEL_BUFFER_SIZE);
-        let (client_response_tx, client_response_rx) = channel::bounded(CHANNEL_BUFFER_SIZE);
-
         Self {
             service_id,
             config,
@@ -118,11 +105,6 @@ impl ServiceApplication {
             subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
             offered_methods: HashMap::with_capacity(8),
             open_requests: Arc::new(Mutex::new(HashMap::with_capacity(MAX_OPEN_REQUESTS))),
-
-            message_process_tx,
-            message_process_rx: Some(message_process_rx),
-            client_response_tx,
-            client_response_rx: Some(client_response_rx),
 
             message_handler_thread: None,
             server_running: Arc::new(AtomicBool::new(false)),
@@ -188,8 +170,13 @@ impl ServiceApplication {
 
                 debug!("Notifying event {} to {:?}", event_id, client_ip);
 
-                if let Err(e) = self.client_response_tx.send((notification_packet, *client_ip)) {
-                    error!("Failed to send notification to {}: {}", client_ip, e);
+                if let Some(tcp_pool) = &self.tcp_pool {
+                    let sender = tcp_pool.get_response_sender();
+                    if let Err(e) = sender.send((notification_packet, *client_ip)) {
+                        error!("Failed to send notification to {}: {}", client_ip, e);
+                    }
+                } else {
+                    error!("TCP pool not available");
                 }
             }
         } else {
@@ -277,15 +264,21 @@ impl ServiceApplication {
         );
 
         let request_id = request_packet.request_id;
-        match self.client_response_tx.send((request_packet, ip_addr)) {
-            Ok(_) => {
-                let mut open_requests = self.open_requests.lock();
-                open_requests.insert(request_id, callback);
-                debug!("Sent method call request with ID: {}", request_id);
+        
+        if let Some(tcp_pool) = &self.tcp_pool {
+            let sender = tcp_pool.get_response_sender();
+            match sender.send((request_packet, ip_addr)) {
+                Ok(_) => {
+                    let mut open_requests = self.open_requests.lock();
+                    open_requests.insert(request_id, callback);
+                    debug!("Sent method call request with ID: {}", request_id);
+                }
+                Err(err) => {
+                    error!("Failed to send request packet: {:?}", err);
+                }
             }
-            Err(err) => {
-                error!("Failed to send request packet: {:?}", err);
-            }
+        } else {
+            error!("TCP pool not available");
         }
     }
 
@@ -347,8 +340,14 @@ impl ServiceApplication {
         let request_id = subscribe_packet.request_id;
         
         // Send the subscription request
-        if let Err(err) = self.client_response_tx.send((subscribe_packet, ip_addr)) {
-            error!("Failed to send subscribe packet: {:?}", err);
+        if let Some(tcp_pool) = &self.tcp_pool {
+            let sender = tcp_pool.get_response_sender();
+            if let Err(err) = sender.send((subscribe_packet, ip_addr)) {
+                error!("Failed to send subscribe packet: {:?}", err);
+                return None;
+            }
+        } else {
+            error!("TCP pool not available");
             return None;
         }
 
@@ -403,11 +402,15 @@ impl ServiceApplication {
         }
     }
 
-    fn handle_message_data_with_rx(&self, message_process_rx: Receiver<RawMessageData>) -> Result<()> {
+    fn handle_message_data_with_rx_and_sender(
+        &self, 
+        message_process_rx: Receiver<RawMessageData>,
+        response_sender: crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>
+    ) -> Result<()> {
         while self.server_running.load(Ordering::SeqCst) {
             match message_process_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok((packet, addr)) => {
-                    self.process_message(packet, addr);
+                    self.process_message_with_sender(packet, addr, &response_sender);
                 }
                 Err(channel::RecvTimeoutError::Timeout) => {
                     continue;
@@ -421,12 +424,12 @@ impl ServiceApplication {
         Ok(())
     }
 
-    fn process_message(&self, packet: ApplicationMessage, addr: IpAddr) {
+    fn process_message_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
         match packet.message_type {
-            ApplicationMessageType::Request => self.handle_request(packet, addr),
+            ApplicationMessageType::Request => self.handle_request_with_sender(packet, addr, response_sender),
             ApplicationMessageType::Response => self.handle_response(packet),
             ApplicationMessageType::Notification => self.handle_notification(packet),
-            ApplicationMessageType::Subscribe => self.handle_subscription(packet, addr),
+            ApplicationMessageType::Subscribe => self.handle_subscription_with_sender(packet, addr, response_sender),
             ApplicationMessageType::Unsubscribe => self.handle_unsubscription(packet, addr),
             ApplicationMessageType::SDFindService
             | ApplicationMessageType::SDOfferService
@@ -437,7 +440,7 @@ impl ServiceApplication {
         }
     }
 
-    fn handle_request(&self, packet: ApplicationMessage, addr: IpAddr) {
+    fn handle_request_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
         debug!("Received request from {:?}", addr);
 
         let response_packet = if let Some(callback) = self.offered_methods.get(&packet.method_id) {
@@ -473,7 +476,7 @@ impl ServiceApplication {
             )
         };
 
-        if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
+        if let Err(e) = response_sender.send((response_packet, addr)) {
             error!("Failed to send response: {}", e);
         }
     }
@@ -500,7 +503,7 @@ impl ServiceApplication {
         }
     }
 
-    fn handle_subscription(&self, packet: ApplicationMessage, addr: IpAddr) {
+    fn handle_subscription_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
         let mut offered_events = self.offered_events.lock();
         if let Some(offered_events_clients) = offered_events.get_mut(&packet.method_id) {
             debug!("New event subscription: {:?}", packet.method_id);
@@ -514,7 +517,7 @@ impl ServiceApplication {
                 vec![],
             );
             
-            if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
+            if let Err(e) = response_sender.send((response_packet, addr)) {
                 error!("Failed to send subscription response: {}", e);
             }
         } else {
@@ -528,7 +531,7 @@ impl ServiceApplication {
                 format!("Event {} not offered", packet.method_id),
             );
             
-            if let Err(e) = self.client_response_tx.send((response_packet, addr)) {
+            if let Err(e) = response_sender.send((response_packet, addr)) {
                 error!("Failed to send error response: {}", e);
             }
         }
@@ -555,21 +558,24 @@ impl ServiceApplication {
         self.server_running.store(true, Ordering::SeqCst);
 
         // Create and start TCP connection pool
-        let client_response_rx = self.client_response_rx.take().unwrap();
         let mut tcp_pool = TcpConnectionPool::new(
             self.config.bind_addr,
             self.config.port,
-            self.message_process_tx.clone(),
-            client_response_rx,
         );
+        
+        // Get the message receiver from the TCP pool for our message handler
+        let message_process_rx = tcp_pool.take_message_receiver().unwrap();
+        
+        // Get the response sender for the message handler
+        let response_sender = tcp_pool.get_response_sender();
+        
         tcp_pool.start(false)?; // Start non-blocking
         self.tcp_pool = Some(tcp_pool);
 
         // Start message handling thread
-        let message_process_rx = self.message_process_rx.take().unwrap();
         let server_for_handler = Arc::new(self.clone());
         let message_handler_thread = thread::spawn(move || {
-            if let Err(e) = server_for_handler.handle_message_data_with_rx(message_process_rx) {
+            if let Err(e) = server_for_handler.handle_message_data_with_rx_and_sender(message_process_rx, response_sender) {
                 error!("Message handler error: {}", e);
             }
         });

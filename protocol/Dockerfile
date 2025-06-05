@@ -1,4 +1,4 @@
-FROM rust:1.87-alpine as builder
+FROM rust:1.87-alpine AS builder
 ARG TARGET
 WORKDIR /src
 COPY . .

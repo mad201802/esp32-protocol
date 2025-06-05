@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::{Read, Write},
-    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
+    net::IpAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -16,16 +15,10 @@ use parking_lot::Mutex;
 use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 
 // Constants for ESP32 optimization
-const MAX_CLIENTS: usize = 8;
-const MAX_SOCKETS: usize = 8;
 const MAX_OPEN_REQUESTS: usize = 16;
 const CHANNEL_BUFFER_SIZE: usize = 32;
-const CLIENT_BUFFER_SIZE: usize = 256;
-const TEMP_BUFFER_SIZE: usize = 256;
-const READ_TIMEOUT_MS: u64 = 100;
-const SLEEP_INTERVAL_MS: u64 = 10;
 const SUBSCRIPTION_TIMEOUT_MS: u64 = 1000;
-const CONNECTION_WAIT_MS: u64 = 500;
+const SLEEP_INTERVAL_MS: u64 = 10;
 
 // Error codes for consistent error handling
 const ERROR_CODE_EVENT_NOT_OFFERED: u8 = 0x02;
@@ -43,17 +36,16 @@ use super::{
         ApplicationMessage, ApplicationMessageReturnCode, ApplicationMessageType,
         MethodInvokeCallback, MethodResponseCallback, OnEventInvokeCallback, RawMessageData,
     },
+    TcpConnectionPool,
 };
 pub struct ServiceApplication {
     service_id: u16,
     config: ServiceApplicationConfig,
     service_discovery: Option<Box<dyn ServiceDiscoveryInterface>>,
 
-    connected_sockets: Arc<Mutex<HashSet<IpAddr>>>,
+    // TCP connection pool for handling all network communication
+    tcp_pool: Option<TcpConnectionPool>,
     
-    // Key: IP Address, Value: Sender for that client
-    client_senders: Arc<Mutex<HashMap<IpAddr, Sender<ApplicationMessage>>>>,
-
     // Key: Method ID, Value: Callback
     offered_methods: HashMap<u16, MethodInvokeCallback>,
 
@@ -70,9 +62,7 @@ pub struct ServiceApplication {
     client_response_rx: Option<Receiver<RawMessageData>>,
 
     // Server thread handle
-    server_thread: Option<JoinHandle<()>>,
     message_handler_thread: Option<JoinHandle<()>>,
-    message_distributor_thread: Option<JoinHandle<()>>,
     server_running: Arc<AtomicBool>,
 }
 
@@ -82,8 +72,7 @@ impl Clone for ServiceApplication {
             service_id: self.service_id,
             config: self.config.clone(),
             service_discovery: None, // Don't clone ServiceDiscovery as it contains non-cloneable types
-            connected_sockets: Arc::clone(&self.connected_sockets),
-            client_senders: Arc::clone(&self.client_senders),
+            tcp_pool: None, // Don't clone TCP pool to avoid conflicts
             offered_methods: self.offered_methods.clone(), // Clone methods for handlers to access them
             offered_events: Arc::clone(&self.offered_events),
             subscribed_events: Arc::clone(&self.subscribed_events),
@@ -92,9 +81,7 @@ impl Clone for ServiceApplication {
             message_process_rx: None, // Don't clone receivers to avoid conflicts
             client_response_tx: self.client_response_tx.clone(),
             client_response_rx: None, // Don't clone receivers to avoid conflicts
-            server_thread: None,
             message_handler_thread: None,
-            message_distributor_thread: None,
             server_running: Arc::clone(&self.server_running),
         }
     }
@@ -125,12 +112,11 @@ impl ServiceApplication {
             config,
             service_discovery: None,
 
-            connected_sockets: Arc::new(Mutex::new(HashSet::with_capacity(MAX_SOCKETS))),
-            client_senders: Arc::new(Mutex::new(HashMap::with_capacity(MAX_CLIENTS))),
+            tcp_pool: None,
 
-            offered_events: Arc::new(Mutex::new(HashMap::with_capacity(MAX_SOCKETS))),
-            subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(MAX_SOCKETS))),
-            offered_methods: HashMap::with_capacity(MAX_SOCKETS),
+            offered_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
+            subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
+            offered_methods: HashMap::with_capacity(8),
             open_requests: Arc::new(Mutex::new(HashMap::with_capacity(MAX_OPEN_REQUESTS))),
 
             message_process_tx,
@@ -138,9 +124,7 @@ impl ServiceApplication {
             client_response_tx,
             client_response_rx: Some(client_response_rx),
 
-            server_thread: None,
             message_handler_thread: None,
-            message_distributor_thread: None,
             server_running: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -213,26 +197,6 @@ impl ServiceApplication {
         }
     }
 
-    /// Connect to a service via ip and port
-    fn connect(&self, ip_addr: IpAddr, port: u16) -> Result<()> {
-        debug!("Connecting to service at {:?}", ip_addr);
-
-        let socket = TcpStream::connect(SocketAddr::new(ip_addr, port))
-            .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {}", ip_addr, e))?;
-
-        let server = Arc::new(self.clone());
-        
-        // Spawn client handler thread
-        thread::spawn(move || {
-            if let Err(e) = server.handle_client(socket) {
-                error!("Client handler error: {}", e);
-            }
-        });
-
-        thread::sleep(Duration::from_millis(CONNECTION_WAIT_MS)); // Wait for the client to be ready
-        Ok(())
-    }
-
     fn service_to_ip(&mut self, service_id: u16) -> Option<IpAddr> {
         // Check if we can get the ip address of the service
 
@@ -256,16 +220,18 @@ impl ServiceApplication {
         // If we have the ip, check if we have a open socket
         let ip_addr = ip_addr.unwrap();
 
-        {
-            let connected_sockets = self.connected_sockets.lock();
-            if connected_sockets.contains(&ip_addr) {
+        if let Some(tcp_pool) = &self.tcp_pool {
+            if tcp_pool.is_connected(ip_addr) {
                 return Some(ip_addr);
             }
-        }
 
-        // If we dont have a open socket, connect to the service
-        if let Err(e) = self.connect(ip_addr, self.config.port) {
-            error!("Failed to connect to service {}: {}", service_id, e);
+            // If we dont have a open socket, connect to the service
+            if let Err(e) = tcp_pool.connect(ip_addr) {
+                error!("Failed to connect to service {}: {}", service_id, e);
+                return None;
+            }
+        } else {
+            error!("TCP pool not initialized");
             return None;
         }
 
@@ -439,7 +405,7 @@ impl ServiceApplication {
 
     fn handle_message_data_with_rx(&self, message_process_rx: Receiver<RawMessageData>) -> Result<()> {
         while self.server_running.load(Ordering::SeqCst) {
-            match message_process_rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS)) {
+            match message_process_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok((packet, addr)) => {
                     self.process_message(packet, addr);
                 }
@@ -576,197 +542,6 @@ impl ServiceApplication {
         }
     }
 
-    /// Handle incoming client connections and messages
-    fn handle_client(&self, mut tcp_stream: TcpStream) -> Result<()> {
-        let socket_addr = tcp_stream.peer_addr()?;
-        info!("Handling client connection from {:?}", socket_addr);
-
-        tcp_stream.set_nonblocking(true)?;
-
-        let (this_client_tx, this_client_rx) = channel::unbounded::<ApplicationMessage>();
-        
-        // Register this client with capacity checks
-        self.register_client(socket_addr.ip(), this_client_tx)?;
-
-        let mut buffer: Vec<u8> = Vec::with_capacity(CLIENT_BUFFER_SIZE);
-        let mut temp_buffer = [0u8; TEMP_BUFFER_SIZE];
-
-        loop {
-            if !self.server_running.load(Ordering::SeqCst) {
-                break;
-            }
-
-            // Handle incoming data
-            match tcp_stream.read(&mut temp_buffer) {
-                Ok(0) => {
-                    info!("[Disconnected] {:?}", socket_addr);
-                    self.unregister_client(socket_addr.ip());
-                    break;
-                }
-                Ok(bytes_read) => {
-                    if let Err(e) = self.process_incoming_data(&mut buffer, &temp_buffer[..bytes_read], socket_addr.ip()) {
-                        error!("Error processing incoming data: {}", e);
-                        buffer.clear();
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data available, check for outgoing messages
-                }
-                Err(e) => {
-                    error!("Failed to read from socket: {}", e);
-                    break;
-                }
-            }
-
-            // Handle outgoing messages
-            if let Err(e) = self.process_outgoing_messages(&mut tcp_stream, &this_client_rx, socket_addr) {
-                error!("Error processing outgoing messages: {}", e);
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(SLEEP_INTERVAL_MS));
-        }
-        Ok(())
-    }
-
-    fn register_client(&self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
-        {
-            let mut client_senders = self.client_senders.lock();
-            if client_senders.len() >= MAX_CLIENTS {
-                return Err(anyhow::anyhow!("Maximum client connections reached"));
-            }
-            client_senders.insert(ip, sender);
-        }
-
-        {
-            let mut connected_sockets = self.connected_sockets.lock();
-            if connected_sockets.len() >= MAX_SOCKETS {
-                return Err(anyhow::anyhow!("Maximum socket connections reached"));
-            }
-            connected_sockets.insert(ip);
-        }
-
-        Ok(())
-    }
-
-    fn unregister_client(&self, ip: IpAddr) {
-        let mut connected_sockets = self.connected_sockets.lock();
-        connected_sockets.remove(&ip);
-
-        let mut client_senders = self.client_senders.lock();
-        client_senders.remove(&ip);
-
-        let mut offered_events = self.offered_events.lock();
-        for (_, connected_clients) in offered_events.iter_mut() {
-            connected_clients.remove(&ip);
-        }
-    }
-
-    fn process_incoming_data(&self, buffer: &mut Vec<u8>, data: &[u8], ip: IpAddr) -> Result<()> {
-        buffer.extend_from_slice(data);
-        
-        match ApplicationMessage::from_bytes(buffer) {
-            Ok(packet) => {
-                self.message_process_tx.send((packet, ip))?;
-                buffer.clear();
-            }
-            Err(_) => {
-                // Packet might be incomplete, keep the data for next iteration
-                // Clear buffer if it gets too large to prevent memory issues
-                if buffer.len() > CLIENT_BUFFER_SIZE * 2 {
-                    buffer.clear();
-                    return Err(anyhow::anyhow!("Buffer overflow, clearing"));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn process_outgoing_messages(
-        &self, 
-        tcp_stream: &mut TcpStream, 
-        client_rx: &Receiver<ApplicationMessage>,
-        socket_addr: SocketAddr
-    ) -> Result<()> {
-        match client_rx.try_recv() {
-            Ok(msg) => {
-                trace!("Sending message to {:?}:{:?}", socket_addr, msg);
-                let packet = ApplicationMessage::to_bytes(&msg)?;
-                tcp_stream.write_all(&packet)?;
-            }
-            Err(TryRecvError::Empty) => {
-                // No messages to send
-            }
-            Err(TryRecvError::Disconnected) => {
-                return Err(anyhow::anyhow!("Client message channel disconnected"));
-            }
-        }
-        Ok(())
-    }
-
-    fn start_listening(&self) -> Result<()> {
-        let listener = TcpListener::bind((self.config.bind_addr, self.config.port))
-            .map_err(|e| anyhow::anyhow!("Failed to bind TCP listener to {}:{}: {}", 
-                self.config.bind_addr, self.config.port, e))?;
-
-        info!(
-            "Listening for incoming connections on {}:{}",
-            self.config.bind_addr, self.config.port
-        );
-
-        for stream in listener.incoming() {
-            if !self.server_running.load(Ordering::SeqCst) {
-                break;
-            }
-
-            match stream {
-                Ok(socket) => {
-                    let addr = socket.peer_addr().unwrap_or_else(|_| {
-                        "unknown".parse::<SocketAddr>().unwrap()
-                    });
-                    info!("[Connected] {:?}", addr);
-
-                    let server = Arc::new(self.clone());
-                    thread::spawn(move || {
-                        if let Err(e) = server.handle_client(socket) {
-                            error!("Client handler error: {}", e);
-                        }
-                    });
-                }
-                Err(e) => {
-                    error!("Failed to accept connection: {}", e);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Message distributor that forwards messages from the global response channel to client-specific channels
-    fn message_distributor(&self, client_response_rx: Receiver<RawMessageData>) -> Result<()> {
-        while self.server_running.load(Ordering::SeqCst) {
-            match client_response_rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS)) {
-                Ok((msg, target_addr)) => {
-                    let client_senders = self.client_senders.lock();
-                    if let Some(client_sender) = client_senders.get(&target_addr) {
-                        if let Err(e) = client_sender.send(msg) {
-                            error!("Failed to send message to client {}: {}", target_addr, e);
-                        }
-                    } else {
-                        debug!("No client found for address: {}", target_addr);
-                    }
-                }
-                Err(channel::RecvTimeoutError::Timeout) => {
-                    continue;
-                }
-                Err(channel::RecvTimeoutError::Disconnected) => {
-                    info!("Message distributor channel disconnected");
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub fn start(&mut self, blocking: bool) -> Result<()> {
         if self.service_discovery.is_none() {
             error!("Service discovery is not initialized");
@@ -779,40 +554,38 @@ impl ServiceApplication {
 
         self.server_running.store(true, Ordering::SeqCst);
 
+        // Create and start TCP connection pool
+        let client_response_rx = self.client_response_rx.take().unwrap();
+        let mut tcp_pool = TcpConnectionPool::new(
+            self.config.bind_addr,
+            self.config.port,
+            self.message_process_tx.clone(),
+            client_response_rx,
+        );
+        tcp_pool.start(false)?; // Start non-blocking
+        self.tcp_pool = Some(tcp_pool);
+
         // Start message handling thread
         let message_process_rx = self.message_process_rx.take().unwrap();
         let server_for_handler = Arc::new(self.clone());
-        let message_handler_thread = {
-            thread::spawn(move || {
-                if let Err(e) = server_for_handler.handle_message_data_with_rx(message_process_rx) {
-                    error!("Message handler error: {}", e);
-                }
-            })
-        };
-
-        // Start message distributor thread
-        let client_response_rx = self.client_response_rx.take().unwrap();
-        let server_for_distributor = Arc::new(self.clone());
-        let message_distributor_thread = {
-            thread::spawn(move || {
-                if let Err(e) = server_for_distributor.message_distributor(client_response_rx) {
-                    error!("Message distributor error: {}", e);
-                }
-            })
-        };
+        let message_handler_thread = thread::spawn(move || {
+            if let Err(e) = server_for_handler.handle_message_data_with_rx(message_process_rx) {
+                error!("Message handler error: {}", e);
+            }
+        });
 
         if blocking {
-            self.start_listening()
-        } else {
-            let server = Arc::new(self.clone());
-            let server_thread = thread::spawn(move || {
-                if let Err(e) = server.start_listening() {
-                    error!("Failed to start listening: {}", e);
-                }
-            });
-            self.server_thread = Some(server_thread);
+            // Block on the message handler thread
             self.message_handler_thread = Some(message_handler_thread);
-            self.message_distributor_thread = Some(message_distributor_thread);
+            loop {
+                if !self.server_running.load(Ordering::SeqCst) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(())
+        } else {
+            self.message_handler_thread = Some(message_handler_thread);
             Ok(())
         }
     }
@@ -829,30 +602,20 @@ impl ServiceApplication {
             service_discovery.stop();
         }
         
-        // Join threads
-        if let Some(server_thread) = self.server_thread.take() {
-            if let Err(e) = server_thread.join() {
-                error!("Server thread panicked: {:?}", e);
-            }
+        // Stop TCP connection pool
+        if let Some(mut tcp_pool) = self.tcp_pool.take() {
+            tcp_pool.stop()?;
         }
         
+        // Join threads
         if let Some(message_handler_thread) = self.message_handler_thread.take() {
             if let Err(e) = message_handler_thread.join() {
                 error!("Message handler thread panicked: {:?}", e);
             }
         }
         
-        if let Some(message_distributor_thread) = self.message_distributor_thread.take() {
-            if let Err(e) = message_distributor_thread.join() {
-                error!("Message distributor thread panicked: {:?}", e);
-            }
-        }
-        
-        // Clear all connections and events
+        // Clear all events and requests
         {
-            let mut connected_sockets = self.connected_sockets.lock();
-            connected_sockets.clear();
-            
             let mut offered_events = self.offered_events.lock();
             offered_events.clear();
             

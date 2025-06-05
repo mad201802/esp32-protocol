@@ -1,38 +1,36 @@
-pub mod eth;
-
-use std::net::Ipv4Addr;
+use std::{env::set_var, net::Ipv4Addr};
 use std::sync::Arc;
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
+use embedded_poc::eth::start_eth;
+use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use esp_idf_sys::esp;
-use eth::start_eth;
-use protocol::application::{_impl_sync::ServiceApplication, message::ApplicationResponseErrorMessage};
+use protocol::{
+    application::{
+        _impl_sync::ServiceApplication, config::ServiceApplicationConfig,
+        message::ApplicationResponseErrorMessage,
+    },
+    sd::config::ServiceDiscoveryConfig,
+};
 
 fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
     // implemented by esp-idf-sys might not link properly. See https://github.com/esp-rs/esp-idf-template/issues/71
     esp_idf_svc::sys::link_patches();
 
-    // Bind the log crate to the ESP Logging facilities
-    esp_idf_svc::log::EspLogger::initialize_default();
-
-    let config = esp_idf_sys::esp_vfs_eventfd_config_t {
-        max_fds: 1,
-        ..Default::default()
-    };
-    esp! { unsafe { esp_idf_sys::esp_vfs_eventfd_register(&config) } }?;
+    EspLogger::initialize_default();
 
     let p = Peripherals::take()?;
     let pins = p.pins;
     let sys_loop = EspSystemEventLoop::take()?;
 
     let ipv4_client_settings_home = ipv4::ClientSettings {
-        ip: Ipv4Addr::new(192, 168, 178, 140),
+        ip: Ipv4Addr::new(192, 168, 0, 5),
         subnet: ipv4::Subnet {
-            gateway: (Ipv4Addr::new(192, 168, 178, 1)),
+            gateway: (Ipv4Addr::new(192, 168, 0, 1)),
             mask: (ipv4::Mask(24)),
         },
         dns: None,
@@ -57,6 +55,7 @@ fn main() -> Result<()> {
     );
 
     let mut app = ServiceApplication::new(0x01);
+
     app.init()?;
 
     app.offer_method(

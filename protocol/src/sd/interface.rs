@@ -1,5 +1,7 @@
-use std::net::IpAddr;
+use std::{collections::HashMap, net::IpAddr};
 use anyhow::Result;
+
+use crate::sd::ServiceEntry;
 
 /// Interface for service discovery implementations
 /// 
@@ -32,6 +34,8 @@ pub trait ServiceDiscoveryInterface: Send + Sync {
     /// * `Some(IpAddr)` if the service is found and reachable
     /// * `None` if the service is not found or unreachable
     fn find_service(&self, service_id: u16) -> Option<IpAddr>;
+
+    fn get_services_mapping(&self) -> HashMap<u16, ServiceEntry>;
 
     /// Stop the service discovery system
     /// 

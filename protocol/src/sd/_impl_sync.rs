@@ -20,7 +20,7 @@ use super::{
 const SD_RECV_BUFFER_SIZE: usize = 64;
 
 #[derive(Debug, Clone)]
-struct ServiceEntry {
+pub struct ServiceEntry {
     ip: IpAddr,
     last_seen: Instant,
 }
@@ -293,6 +293,12 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
         self.socket.take();
 
         info!("Service discovery stopped with ID: {}", self.service_id);
+    }
+
+    fn get_services_mapping(&self) -> HashMap<u16, ServiceEntry> {
+        // Clean up stale entries before returning
+        self.cleanup_stale_services();
+        self.services_mapping.lock().clone()
     }
 
     /// Get the service ID for this instance

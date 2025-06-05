@@ -348,7 +348,7 @@ impl ServiceApplication {
                 return;
             }
         };
-
+        
         let subscription_successful = self.attempt_subscription(event_id, ip_addr);
 
         if subscription_successful {

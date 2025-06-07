@@ -24,10 +24,7 @@ pub enum ApplicationMessageType {
     Notification = 0x02,
     Subscribe = 0x01,
     Unsubscribe = 0x03,
-    Response = 0x80,
-    SDFindService = 0x04,
-    SDOfferService = 0x05,
-    SDStopOfferService = 0x06,
+    Response = 0x04,
     INVALID = 0xFF,
 }
 
@@ -38,10 +35,7 @@ impl From<u8> for ApplicationMessageType {
             0x02 => ApplicationMessageType::Notification,
             0x01 => ApplicationMessageType::Subscribe,
             0x03 => ApplicationMessageType::Unsubscribe,
-            0x80 => ApplicationMessageType::Response,
-            0x04 => ApplicationMessageType::SDFindService,
-            0x05 => ApplicationMessageType::SDOfferService,
-            0x06 => ApplicationMessageType::SDStopOfferService,
+            0x04 => ApplicationMessageType::Response,
             _ => ApplicationMessageType::INVALID,
         }
     }
@@ -232,7 +226,7 @@ mod tests {
         assert_eq!(ApplicationMessageType::from(0x00), ApplicationMessageType::Request);
         assert_eq!(ApplicationMessageType::from(0x02), ApplicationMessageType::Notification);
         assert_eq!(ApplicationMessageType::from(0x03), ApplicationMessageType::Unsubscribe);
-        assert_eq!(ApplicationMessageType::from(0x80), ApplicationMessageType::Response);
+        assert_eq!(ApplicationMessageType::from(0x04), ApplicationMessageType::Response);
     }
 
     #[test]

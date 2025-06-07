@@ -431,10 +431,7 @@ impl ServiceApplication {
             ApplicationMessageType::Notification => self.handle_notification(packet),
             ApplicationMessageType::Subscribe => self.handle_subscription_with_sender(packet, addr, response_sender),
             ApplicationMessageType::Unsubscribe => self.handle_unsubscription(packet, addr),
-            ApplicationMessageType::SDFindService
-            | ApplicationMessageType::SDOfferService
-            | ApplicationMessageType::SDStopOfferService
-            | ApplicationMessageType::INVALID => {
+            ApplicationMessageType::INVALID => {
                 error!("Unexpected message type: {:?}", packet.message_type);
             }
         }

@@ -319,6 +319,61 @@ impl ServiceApplication {
         }
     }
 
+    /// Unsubscribes from an event on a remote service
+    /// 
+    /// This method sends an unsubscribe request to the remote service and removes
+    /// the event callback from the local subscribed events list.
+    /// 
+    /// # Arguments
+    /// * `service_id` - ID of the service offering the event
+    /// * `event_id` - ID of the event to unsubscribe from
+    pub fn unsubscribe(&mut self, service_id: u16, event_id: u16) {
+        debug!("Unsubscribing from event {} on service {}", event_id, service_id);
+
+        // Remove the event callback from local subscriptions first
+        {
+            let mut subscribed_events = self.subscribed_events.lock();
+            if subscribed_events.remove(&event_id).is_some() {
+                debug!("Removed local subscription for event {}", event_id);
+            } else {
+                debug!("No local subscription found for event {}", event_id);
+            }
+        }
+
+        // Find the service IP address
+        let ip_addr = match self.service_to_ip(service_id) {
+            Some(addr) => addr,
+            None => {
+                error!("Could not find service with ID: {} for unsubscribe", service_id);
+                return;
+            }
+        };
+
+        // Send unsubscribe request to the remote service
+        let unsubscribe_packet = ApplicationMessage::new(
+            self.service_id,
+            event_id,
+            None,
+            ApplicationMessageType::Unsubscribe,
+            ApplicationMessageReturnCode::Ok,
+            vec![],
+        );
+
+        if let Some(tcp_pool) = &self.tcp_pool {
+            let sender = tcp_pool.get_response_sender();
+            match sender.send((unsubscribe_packet, ip_addr)) {
+                Ok(_) => {
+                    debug!("Sent unsubscribe request for event {} to service {}", event_id, service_id);
+                }
+                Err(err) => {
+                    error!("Failed to send unsubscribe packet: {:?}", err);
+                }
+            }
+        } else {
+            error!("TCP pool not available for unsubscribe");
+        }
+    }
+
     fn attempt_subscription(&self, event_id: u16, ip_addr: IpAddr) -> bool {
         retry_with_delay_option_sync(
             || self.send_subscription_request(event_id, ip_addr),
@@ -483,7 +538,7 @@ impl ServiceApplication {
         let mut open_requests = self.open_requests.lock();
         if let Some(request_callback) = open_requests.remove(&packet.request_id) {
             if packet.return_code == ApplicationMessageReturnCode::Ok {
-                let _result = request_callback(Ok(packet.payload));
+                let _result: std::result::Result<Vec<u8>, ApplicationResponseErrorMessage> = request_callback(Ok(packet.payload));
             } else {
                 let error_message = ApplicationResponseErrorMessage::from_bytes(&packet.payload)
                     .unwrap();

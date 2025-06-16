@@ -18,10 +18,12 @@ use crossbeam::channel::{self, Receiver, TryRecvError};
 const MAX_OPEN_REQUESTS: usize = 16;
 const SUBSCRIPTION_TIMEOUT_MS: u64 = 1000;
 const SLEEP_INTERVAL_MS: u64 = 10;
+const REQUEST_TIMEOUT_CHECK_INTERVAL_MS: u64 = 1000;
 
 // Error codes for consistent error handling
 const ERROR_CODE_EVENT_NOT_OFFERED: u8 = 0x02;
 const ERROR_CODE_METHOD_NOT_FOUND: u8 = 0x03;
+const ERROR_CODE_TIMEOUT: u8 = 0x04;
 
 use crate::{
     application::message::ApplicationResponseErrorMessage, 
@@ -37,6 +39,13 @@ use super::{
     },
     TcpConnectionPool,
 };
+
+// Structure to track request timeouts
+struct RequestTimeout {
+    callback: MethodResponseCallback,
+    deadline: Instant,
+}
+
 pub struct ServiceApplication {
     service_id: u16,
     config: ServiceApplicationConfig,
@@ -52,11 +61,12 @@ pub struct ServiceApplication {
     offered_events: Arc<Mutex<HashMap<u16, HashSet<IpAddr>>>>,
     subscribed_events: Arc<Mutex<HashMap<u16, OnEventInvokeCallback>>>,
 
-    // Key: Request ID, Value: Callback
-    open_requests: Arc<Mutex<HashMap<u16, MethodResponseCallback>>>,
+    // Key: Request ID, Value: Request with timeout info
+    open_requests: Arc<Mutex<HashMap<u16, RequestTimeout>>>,
 
-    // Server thread handle
+    // Server thread handles
     message_handler_thread: Option<JoinHandle<()>>,
+    timeout_handler_thread: Option<JoinHandle<()>>,
     server_running: Arc<AtomicBool>,
 }
 
@@ -72,6 +82,7 @@ impl Clone for ServiceApplication {
             subscribed_events: Arc::clone(&self.subscribed_events),
             open_requests: Arc::clone(&self.open_requests),
             message_handler_thread: None,
+            timeout_handler_thread: None,
             server_running: Arc::clone(&self.server_running),
         }
     }
@@ -107,6 +118,7 @@ impl ServiceApplication {
             open_requests: Arc::new(Mutex::new(HashMap::with_capacity(MAX_OPEN_REQUESTS))),
 
             message_handler_thread: None,
+            timeout_handler_thread: None,
             server_running: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -270,7 +282,12 @@ impl ServiceApplication {
             match sender.send((request_packet, ip_addr)) {
                 Ok(_) => {
                     let mut open_requests = self.open_requests.lock();
-                    open_requests.insert(request_id, callback);
+                    let deadline = Instant::now() + self.config.method_call_timeout;
+                    let request_timeout = RequestTimeout {
+                        callback,
+                        deadline,
+                    };
+                    open_requests.insert(request_id, request_timeout);
                     debug!("Sent method call request with ID: {}", request_id);
                 }
                 Err(err) => {
@@ -417,10 +434,15 @@ impl ServiceApplication {
         // Store the response sender in open_requests
         {
             let mut open_requests = self.open_requests.lock();
-            open_requests.insert(request_id, Arc::new(move |result| {
-                let _ = response_tx.try_send(result);
-                Ok(vec![])
-            }));
+            let deadline = Instant::now() + Duration::from_millis(SUBSCRIPTION_TIMEOUT_MS);
+            let request_timeout = RequestTimeout {
+                callback: Arc::new(move |result| {
+                    let _ = response_tx.try_send(result);
+                    Ok(vec![])
+                }),
+                deadline,
+            };
+            open_requests.insert(request_id, request_timeout);
         }
         
         // Wait for response with timeout
@@ -536,7 +558,8 @@ impl ServiceApplication {
     fn handle_response(&self, packet: ApplicationMessage) {
         trace!("Received Response Message: {:?}", packet);
         let mut open_requests = self.open_requests.lock();
-        if let Some(request_callback) = open_requests.remove(&packet.request_id) {
+        if let Some(request_timeout) = open_requests.remove(&packet.request_id) {
+            let request_callback = request_timeout.callback;
             if packet.return_code == ApplicationMessageReturnCode::Ok {
                 let _result: std::result::Result<Vec<u8>, ApplicationResponseErrorMessage> = request_callback(Ok(packet.payload));
             } else {
@@ -632,9 +655,16 @@ impl ServiceApplication {
             }
         });
 
+        // Start timeout handling thread
+        let server_for_timeout = Arc::new(self.clone());
+        let timeout_handler_thread = thread::spawn(move || {
+            server_for_timeout.handle_request_timeouts();
+        });
+
         if blocking {
             // Block on the message handler thread
             self.message_handler_thread = Some(message_handler_thread);
+            self.timeout_handler_thread = Some(timeout_handler_thread);
             loop {
                 if !self.server_running.load(Ordering::SeqCst) {
                     break;
@@ -644,6 +674,7 @@ impl ServiceApplication {
             Ok(())
         } else {
             self.message_handler_thread = Some(message_handler_thread);
+            self.timeout_handler_thread = Some(timeout_handler_thread);
             Ok(())
         }
     }
@@ -672,6 +703,12 @@ impl ServiceApplication {
             }
         }
         
+        if let Some(timeout_handler_thread) = self.timeout_handler_thread.take() {
+            if let Err(e) = timeout_handler_thread.join() {
+                error!("Timeout handler thread panicked: {:?}", e);
+            }
+        }
+        
         // Clear all events and requests
         {
             let mut offered_events = self.offered_events.lock();
@@ -688,6 +725,44 @@ impl ServiceApplication {
         
         info!("Service application shutdown complete");
         Ok(())
+    }
+
+    /// Handle timeout checking for pending method call requests
+    fn handle_request_timeouts(&self) {
+        while self.server_running.load(Ordering::SeqCst) {
+            let now = Instant::now();
+            let mut timed_out_requests = Vec::new();
+            
+            // Check for timed out requests
+            {
+                let mut open_requests = self.open_requests.lock();
+                let mut to_remove = Vec::new();
+                
+                for (&request_id, request_timeout) in open_requests.iter() {
+                    if now > request_timeout.deadline {
+                        timed_out_requests.push((request_id, request_timeout.callback.clone()));
+                        to_remove.push(request_id);
+                    }
+                }
+                
+                // Remove timed out requests
+                for request_id in to_remove {
+                    open_requests.remove(&request_id);
+                }
+            }
+            
+            // Process timed out requests
+            for (request_id, callback) in timed_out_requests {
+                debug!("Request {} timed out", request_id);
+                let timeout_error = ApplicationResponseErrorMessage::new(
+                    ERROR_CODE_TIMEOUT,
+                    "Request timed out".to_string(),
+                );
+                let _result = callback(Err(timeout_error));
+            }
+            
+            thread::sleep(Duration::from_millis(REQUEST_TIMEOUT_CHECK_INTERVAL_MS));
+        }
     }
 
     /// Helper method to create a success response packet

@@ -1,6 +1,5 @@
 services:
   server:
-    container_name: server
     build:
       args:
         TARGET: server
@@ -11,7 +10,6 @@ services:
       - development
     
   client:
-    container_name: client
     build:
       args:
         TARGET: client

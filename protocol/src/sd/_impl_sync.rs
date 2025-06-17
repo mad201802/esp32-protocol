@@ -294,15 +294,4 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
 
         info!("Service discovery stopped with ID: {}", self.service_id);
     }
-
-    fn get_services_mapping(&self) -> HashMap<u16, ServiceEntry> {
-        // Clean up stale entries before returning
-        self.cleanup_stale_services();
-        self.services_mapping.lock().clone()
-    }
-
-    /// Get the service ID for this instance
-    fn service_id(&self) -> u16 {
-        self.service_id
-    }
 }

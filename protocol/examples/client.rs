@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration, thread};
+use std::{sync::Arc, thread::{self, sleep}, time::Duration};
 
 use anyhow::Result;
 use protocol::application::_impl_sync::ServiceApplication;
@@ -6,7 +6,7 @@ use protocol::application::_impl_sync::ServiceApplication;
 fn main() -> Result<()> {
     env_logger::init();
 
-    let mut app = ServiceApplication::new(0x02);
+    let mut app = ServiceApplication::new(rand::random::<u16>());
     app.init()?;
     app.start(false)?;
 
@@ -31,13 +31,13 @@ fn main() -> Result<()> {
         }),
     );
 
-    app.subscribe(0x01, 0x02, Arc::new(|data| {
-        println!("Received event data: {:?}", data);
-    }));
+    // app.subscribe(0x01, 0x02, Arc::new(|data| {
+    //     println!("Received event data: {:?}", data);
+    // }));
 
-    app.subscribe(0x01, 0x03, Arc::new(|data| {
-        println!("Received event data: {:?}", data);
-    }));
+    // app.subscribe(0x01, 0x03, Arc::new(|data| {
+    //     println!("Received event data: {:?}", data);
+    // }));
 
     loop {
         thread::sleep(Duration::from_secs(1));

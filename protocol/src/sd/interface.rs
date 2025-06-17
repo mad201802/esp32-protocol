@@ -35,14 +35,9 @@ pub trait ServiceDiscoveryInterface: Send + Sync {
     /// * `None` if the service is not found or unreachable
     fn find_service(&self, service_id: u16) -> Option<IpAddr>;
 
-    fn get_services_mapping(&self) -> HashMap<u16, ServiceEntry>;
-
     /// Stop the service discovery system
     /// 
     /// This should gracefully shut down all background threads and
     /// announce that this service is no longer available.
     fn stop(&mut self);
-
-    /// Get the service ID for this instance
-    fn service_id(&self) -> u16;
 }

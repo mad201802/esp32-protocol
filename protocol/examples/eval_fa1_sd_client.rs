@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::{self, sleep}, time::Duration};
+use std::{thread::{self}, time::Duration};
 
 use anyhow::Result;
 use protocol::sd::{ServiceDiscovery, ServiceDiscoveryInterface};

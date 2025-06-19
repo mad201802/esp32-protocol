@@ -242,11 +242,7 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
         self.cleanup_stale_services();
 
         let mapping = self.services_mapping.lock();
-        if let Some(entry) = mapping.get(&service_id) {
-            Some(entry.ip)
-        } else {
-            None
-        }
+        mapping.get(&service_id).map(|entry| entry.ip)
     }
 
     /// Stops the service discovery and cleans up resources.

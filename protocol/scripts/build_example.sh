@@ -38,7 +38,7 @@ build_all_examples() {
         if [ -n "$cargo_cmd" ]; then
             cargo_cmd="$cargo_cmd && "
         fi
-        cargo_cmd="${cargo_cmd}cargo build --example $example"
+        cargo_cmd="${cargo_cmd}cargo build --release --example $example"
     done
     
     docker run --rm --user 1000 -v "$PWD":/usr/src/protocol -w /usr/src/protocol rust:1.86.0-slim sh -c "$cargo_cmd"
@@ -55,7 +55,7 @@ build_specific_examples() {
         if [ -n "$cargo_cmd" ]; then
             cargo_cmd="$cargo_cmd && "
         fi
-        cargo_cmd="${cargo_cmd}cargo build --example $example"
+        cargo_cmd="${cargo_cmd}cargo build --release --example $example"
     done
     
     # Run all build commands in a single Docker container

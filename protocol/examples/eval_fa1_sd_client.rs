@@ -10,7 +10,7 @@ fn main() -> Result<()> {
     sd.init()?;
     sd.start()?;
 
-    loop {
-        thread::sleep(Duration::from_secs(1));
-    }
+    thread::sleep(Duration::from_secs(5));
+    
+    Ok(())
 }

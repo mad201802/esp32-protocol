@@ -1,0 +1,28 @@
+services:
+  server:
+    image: protocol:latest
+    environment:
+      - RUST_LOG=trace
+    volumes:
+      - ../target/release/examples:/app
+    stop_grace_period: 1s
+    command: /usr/bin/time -v /app/eval_fa1_sd_server
+    networks:
+      - development
+    
+  client:
+    image: protocol:latest
+    environment:
+      - RUST_LOG=trace
+    volumes:
+      - ../target/release/examples:/app
+    stop_grace_period: 1s
+    command: /usr/bin/time -v /app/eval_fa1_sd_client
+    networks:
+      - development
+    depends_on:
+      - server
+
+networks:
+  development:
+    name: development

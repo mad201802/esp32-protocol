@@ -1,7 +1,6 @@
-use std::{collections::HashMap, net::IpAddr};
+use std::net::IpAddr;
 use anyhow::Result;
 
-use crate::sd::ServiceEntry;
 
 /// Interface for service discovery implementations
 /// 

@@ -26,7 +26,6 @@ fn main() -> Result<()> {
     );
 
     app.offer_event(0x02);
-    app.offer_event(0x03);
 
     app.start(false)?;
 

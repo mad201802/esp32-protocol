@@ -31,13 +31,9 @@ fn main() -> Result<()> {
         }),
     );
 
-    // app.subscribe(0x01, 0x02, Arc::new(|data| {
-    //     println!("Received event data: {:?}", data);
-    // }));
-
-    // app.subscribe(0x01, 0x03, Arc::new(|data| {
-    //     println!("Received event data: {:?}", data);
-    // }));
+    app.subscribe(0x01, 0x02, Arc::new(|data| {
+        println!("Received event data: {:?}", data);
+    }));
 
     loop {
         thread::sleep(Duration::from_secs(1));

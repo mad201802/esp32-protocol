@@ -14,6 +14,7 @@ use std::{
 
 use super::{
     ServiceDiscoveryInterface, config::ServiceDiscoveryConfig, packets::ServiceDiscoveryMessage,
+    error::ServiceDiscoveryError,
 };
 
 // Service discovery packets are small (3 bytes), but we allow some buffer for network overhead
@@ -76,6 +77,64 @@ impl ServiceDiscovery {
             is_fresh
         });
     }
+
+    /// Check if the current service ID is already being broadcasted on the network
+    ///
+    /// This method will listen on the multicast socket for a brief period to detect
+    /// if another service with the same ID is already broadcasting.
+    ///
+    /// # Returns
+    /// * `Ok(())` if no conflict is detected
+    /// * `Err(ServiceDiscoveryError::ServiceIdConflict)` if the service ID is already in use
+    fn check_service_id_conflict(&self) -> std::result::Result<(), ServiceDiscoveryError> {
+        let socket = self.socket.as_ref()
+            .ok_or(ServiceDiscoveryError::SocketNotInitialized)?;
+
+        info!("Checking for service ID conflicts for ID: {}", self.service_id);
+        
+        // Set a reasonable timeout for conflict detection
+        let conflict_check_timeout = Duration::from_millis(2000);
+        let start_time = Instant::now();
+        
+        // Temporarily set socket to blocking mode with timeout for conflict check
+        socket.set_read_timeout(Some(Duration::from_millis(50)))
+            .map_err(|e| ServiceDiscoveryError::BindFailed(e))?;
+        socket.set_nonblocking(false)
+            .map_err(|e| ServiceDiscoveryError::BindFailed(e))?;
+
+        let mut buf = [0; SD_RECV_BUFFER_SIZE];
+        
+        while start_time.elapsed() < conflict_check_timeout {
+            match socket.recv_from(&mut buf) {
+                Ok((size, src)) => {
+                    if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
+                        if let ServiceDiscoveryMessage::OfferService(id) = packet {
+                            if id == self.service_id {
+                                error!("Service ID conflict detected: Service ID {} is already being offered by {}", 
+                                       id, src.ip());
+                                // Restore socket to non-blocking mode before returning error
+                                let _ = socket.set_nonblocking(true);
+                                return Err(ServiceDiscoveryError::ServiceIdConflict(self.service_id));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Timeout or would block - continue checking
+                    if e.kind() != std::io::ErrorKind::TimedOut && e.kind() != std::io::ErrorKind::WouldBlock {
+                        error!("Error during conflict check: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Restore socket to non-blocking mode
+        socket.set_nonblocking(true)
+            .map_err(|e| ServiceDiscoveryError::BindFailed(e))?;
+
+        info!("No service ID conflict detected for ID: {}", self.service_id);
+        Ok(())
+    }
 }
 
 /// Implement the ServiceDiscoveryInterface trait for ServiceDiscovery
@@ -113,9 +172,10 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
     ///
     /// # Returns
     /// * `Ok(())` if both threads started successfully
-    /// * `Err` if socket is not initialized
+    /// * `Err` if socket is not initialized or service ID conflict is detected
     ///
     /// # Behavior
+    /// - First checks if the service ID is already in use on the network
     /// - Receiver thread listens for incoming service announcements
     /// - Sender thread broadcasts this service's availability periodically
     fn start(&mut self) -> Result<()> {
@@ -124,6 +184,11 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
         }
 
         info!("Starting service discovery with ID: {}", self.service_id);
+
+        // Check for service ID conflicts before starting
+        if let Err(conflict_err) = self.check_service_id_conflict() {
+            return Err(anyhow::anyhow!("Service ID conflict: {}", conflict_err));
+        }
 
         let socket = self.socket.clone().unwrap();
 

@@ -17,6 +17,8 @@ pub enum ServiceDiscoveryError {
     AlreadyRunning,
     /// Service discovery is not running
     NotRunning,
+    /// Service ID is already in use on the network
+    ServiceIdConflict(u16),
 }
 
 impl fmt::Display for ServiceDiscoveryError {
@@ -42,6 +44,9 @@ impl fmt::Display for ServiceDiscoveryError {
             }
             ServiceDiscoveryError::NotRunning => {
                 write!(f, "Service discovery is not running")
+            }
+            ServiceDiscoveryError::ServiceIdConflict(service_id) => {
+                write!(f, "Service ID {} is already in use on the network", service_id)
             }
         }
     }

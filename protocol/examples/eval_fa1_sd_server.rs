@@ -15,10 +15,9 @@ fn main() -> Result<()> {
     thread::sleep(Duration::from_secs(3));
 
     // Check if the peer service is available
-    assert!(sd.find_service(PEER_SERVICE_ID).is_some(), "EVAL FAILED: Peer service with ID {} is not available.", PEER_SERVICE_ID);
-    println!("EVAL PASSED: Peer service with ID {} is available.", PEER_SERVICE_ID);
-
-    sd.stop();
+    let ip = sd.find_service(PEER_SERVICE_ID);
+    assert!(ip.is_some(), "EVAL FAILED: Peer service with ID {} is not available.", PEER_SERVICE_ID);
+    println!("EVAL PASSED: Peer service with ID {} and address {} is available.", PEER_SERVICE_ID, ip.unwrap());
     
     Ok(())
 }

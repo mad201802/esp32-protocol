@@ -166,7 +166,7 @@ impl ServiceApplication {
         let offered_events = self.offered_events.lock();
         if let Some(clients_to_notify) = offered_events.get(&event_id) {
             if clients_to_notify.is_empty() {
-                debug!("No subscribers for event {}", event_id);
+                trace!("No subscribers for event {}", event_id);
                 return;
             }
 

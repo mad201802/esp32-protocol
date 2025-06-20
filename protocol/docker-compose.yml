@@ -2,7 +2,7 @@ services:
   server:
     build:
       args:
-        TARGET: server
+        TARGET: _dev_server
     environment:
       - RUST_LOG=debug
     stop_grace_period: 1s
@@ -12,7 +12,7 @@ services:
   client:
     build:
       args:
-        TARGET: client
+        TARGET: _dev_client
     environment:
       - RUST_LOG=debug
     stop_grace_period: 1s

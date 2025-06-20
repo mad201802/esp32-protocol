@@ -7,7 +7,7 @@ services:
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s
-    command: /app/eval_fa1_sd_server
+    command: /app/eval_fa3_method_server
     networks:
       - development
     
@@ -19,7 +19,7 @@ services:
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s
-    command: /app/eval_fa1_sd_client
+    command: /app/eval_fa3_method_client
     networks:
       - development
     depends_on:

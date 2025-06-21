@@ -29,6 +29,7 @@ esp-idf-svc = { version = "0.51", features = ["critical-section", "embassy-time-
 esp-idf-sys = {version="0.36.1", features = ["binstart"] }
 
 protocol = {path = "../protocol"}
+crossbeam = "0.8.4"
 
 
 [build-dependencies]

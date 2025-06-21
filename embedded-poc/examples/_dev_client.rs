@@ -6,8 +6,9 @@ use std::{env::set_var, net::Ipv4Addr};
 use anyhow::Result;
 use embedded_poc::eth::start_eth;
 use esp_idf_svc::log::EspLogger;
+use esp_idf_svc::hal::sys;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
-use esp_idf_sys::esp;
+use esp_idf_sys::{esp, esp_get_free_heap_size, uxTaskGetStackHighWaterMark, xTaskGetCurrentTaskHandle};
 use protocol::{
     application::{
         _impl_sync::ServiceApplication, config::ServiceApplicationConfig,
@@ -38,22 +39,28 @@ fn main() -> Result<()> {
         secondary_dns: None,
     };
 
-    let (_lan_power, _eth) = start_eth(
-        Some(ipv4_client_settings_home),
-        p.mac,
-        pins.gpio12,
-        pins.gpio25,
-        pins.gpio26,
-        pins.gpio27,
-        pins.gpio23,
-        pins.gpio22,
-        pins.gpio21,
-        pins.gpio19,
-        pins.gpio18,
-        pins.gpio17,
-        pins.gpio5,
-        &sys_loop,
-    );
+    unsafe {
+        // Print the free heap size for debugging purposes
+        println!("Free heap size: {} bytes", esp_get_free_heap_size());
+        println!("Stack high water mark: {} bytes", uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle()));
+    }
+
+    // let (_lan_power, _eth) = start_eth(
+    //     Some(ipv4_client_settings_home),
+    //     p.mac,
+    //     pins.gpio12,
+    //     pins.gpio25,
+    //     pins.gpio26,
+    //     pins.gpio27,
+    //     pins.gpio23,
+    //     pins.gpio22,
+    //     pins.gpio21,
+    //     pins.gpio19,
+    //     pins.gpio18,
+    //     pins.gpio17,
+    //     pins.gpio5,
+    //     &sys_loop,
+    // );
 
     let mut app = ServiceApplication::new(0x02);
 

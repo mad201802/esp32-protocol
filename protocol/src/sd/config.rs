@@ -21,7 +21,7 @@ impl Default for ServiceDiscoveryConfig {
             port: 30490,
             broadcast_interval: Duration::from_secs(1),
             socket_timeout: Duration::from_secs(5),
-            service_ttl: Duration::from_secs(30),
+            service_ttl: Duration::from_secs(5),
         }
     }
 }

@@ -1,0 +1,44 @@
+services:
+  server:
+    build:
+      context: .
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ../target/release/examples:/app
+    stop_grace_period: 1s
+    command: sh -c "ls /sys/class/net/ | xargs -I {} tc qdisc add dev {} root netem loss 0% && /app/eval_nfa6_robustness_server"
+    networks:
+      - development
+    
+  client-1:
+    build:
+      context: .
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ../target/release/examples:/app
+    stop_grace_period: 1s
+    command: /app/eval_nfa6_robustness_client
+    networks:
+      - development
+    depends_on:
+      - server
+
+  client-2:
+    build:
+      context: .
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ../target/release/examples:/app
+    stop_grace_period: 1s
+    command: /app/eval_nfa6_robustness_client
+    networks:
+      - development
+    depends_on:
+      - server
+
+networks:
+  development:
+    name: development

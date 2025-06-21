@@ -1,0 +1,21 @@
+services:
+  client:
+    build:
+      context: .
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ../target/release/examples:/app
+    command: /app/eval_nfa5_scalability 10
+    deploy:
+      replicas: 10
+      update_config:
+        parallelism: 10  # Deploy all replicas simultaneously
+        delay: 0s
+        order: start-first
+    networks:
+      - development
+
+networks:
+  development:
+    name: development

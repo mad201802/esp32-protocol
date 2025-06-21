@@ -135,6 +135,11 @@ impl ServiceDiscovery {
         info!("No service ID conflict detected for ID: {}", self.service_id);
         Ok(())
     }
+
+    pub fn get_service_mapping(&self) -> HashMap<u16, ServiceEntry> {
+        self.services_mapping.lock().clone()
+    }
+
 }
 
 /// Implement the ServiceDiscoveryInterface trait for ServiceDiscovery

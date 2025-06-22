@@ -2,38 +2,44 @@ services:
   server:
     build:
       context: .
+      network: host
     environment:
-      - RUST_LOG=info
+      - RUST_LOG=debug
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s
-    command: sh -c "ls /sys/class/net/ | xargs -I {} tc qdisc add dev {} root netem loss 0% && /app/eval_nfa6_robustness_server"
+    command: sh -c "ls /sys/class/net/ | xargs -I {} tc qdisc add dev {} root netem delay 100ms 10ms distribution normal loss 5% reorder 10% gap 4 && /app/eval_nfa6_robustness_server" # Reordering + packet loss + jitter
+    privileged: true
     networks:
       - development
     
-  client-1:
+  client-1-network:
     build:
       context: .
+      network: host
     environment:
       - RUST_LOG=info
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s
-    command: /app/eval_nfa6_robustness_client
+    command: sh -c "ls /sys/class/net/ | xargs -I {} tc qdisc add dev {} root netem delay 100ms 10ms distribution normal loss 5% reorder 10% gap 4 && /app/eval_nfa6_robustness_client" # Reordering + packet loss + jitter
+    privileged: true
     networks:
       - development
     depends_on:
       - server
 
-  client-2:
+  client-2-timeout:
     build:
       context: .
+      network: host
     environment:
       - RUST_LOG=info
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s
-    command: /app/eval_nfa6_robustness_client
+    command: timeout 10 /app/eval_nfa6_robustness_client # Timeout after 5 seconds
+    privileged: true
     networks:
       - development
     depends_on:

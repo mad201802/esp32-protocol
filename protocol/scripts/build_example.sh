@@ -44,7 +44,7 @@ build_all_examples() {
         cargo_cmd="${cargo_cmd}cargo build --release --example $example"
     done
     
-    docker run --rm --user 1000 -v "$PWD":/usr/src/protocol -w /usr/src/protocol "$DOCKER_IMAGE" sh -c "$cargo_cmd"
+    docker run --rm --user 1000 --network=host -v "$PWD":/usr/src/protocol -w /usr/src/protocol "$DOCKER_IMAGE" sh -c "$cargo_cmd"
 }
 
 # Function to build specific examples
@@ -62,7 +62,7 @@ build_specific_examples() {
     done
     
     # Run all build commands in a single Docker container
-    docker run --rm --user 1000 -v "$PWD":/usr/src/protocol -w /usr/src/protocol "$DOCKER_IMAGE" sh -c "$cargo_cmd"
+    docker run --rm --user 1000 --network=host -v "$PWD":/usr/src/protocol -w /usr/src/protocol "$DOCKER_IMAGE" sh -c "$cargo_cmd"
 }
 
 # Main logic

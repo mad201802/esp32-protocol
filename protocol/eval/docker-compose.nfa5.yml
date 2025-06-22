@@ -1,4 +1,16 @@
+# docker compose -f docker-compose.nfa5.yml up
 services:
+  server:
+    build:
+      context: .
+    environment:
+      - RUST_LOG=info
+    volumes:
+      - ../target/release/examples:/app
+    command: /app/eval_nfa5_scalability_server
+    networks:
+      - development
+
   client:
     build:
       context: .
@@ -6,15 +18,20 @@ services:
       - RUST_LOG=info
     volumes:
       - ../target/release/examples:/app
-    command: /app/eval_nfa5_scalability 10
-    deploy:
-      replicas: 10
-      update_config:
-        parallelism: 10  # Deploy all replicas simultaneously
-        delay: 0s
-        order: start-first
+    command: /app/eval_nfa5_scalability_client
+    depends_on:
+      - server
     networks:
       - development
+    deploy:
+      replicas: 8
+
+  tcpdump:
+    image: kaazing/tcpdump
+    networks:
+      - development
+    volumes:
+      - ./tcpdump:/tcpdump
 
 networks:
   development:

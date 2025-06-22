@@ -65,11 +65,16 @@ fn main() -> Result<()> {
         let avg_time = total_time / rtt_times.len() as u32;
         let min_time = rtt_times.iter().min().unwrap();
         let max_time = rtt_times.iter().max().unwrap();
+        let std_dev: f64 = (rtt_times.iter()
+            .map(|&rtt| (rtt.as_secs_f64() * 1000.0 - avg_time.as_secs_f64() * 1000.0).powi(2))
+            .sum::<f64>() / rtt_times.len() as f64)
+            .sqrt();
 
         println!("============================================");
         println!("RTT Test Results:");
         println!("  Successful requests: {}/{}", rtt_times.len(), NUM_ITERATIONS);
         println!("  Average RTT: {:.2} ms", avg_time.as_secs_f64() * 1000.0);
+        println!("  Standard Deviation: {:.2} ms", std_dev);
         println!("  Minimum RTT: {:.2} ms", min_time.as_secs_f64() * 1000.0);
         println!("  Maximum RTT: {:.2} ms", max_time.as_secs_f64() * 1000.0);
 

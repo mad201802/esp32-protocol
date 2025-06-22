@@ -4,5 +4,5 @@ FROM ubuntu:22.04
 RUN apt-get update && \
     apt-get install -y \
     time \
-    linux-tools-6.8.0-60-generic \
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*

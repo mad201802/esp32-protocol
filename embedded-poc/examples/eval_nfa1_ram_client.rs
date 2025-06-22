@@ -8,6 +8,8 @@ use embedded_poc::eth::start_eth;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use esp_idf_sys::{esp_get_free_heap_size,};
+use protocol::sd::ServiceDiscoveryInterface;
+use log::{info};
 use protocol::{
     application::{
         _impl_sync::ServiceApplication
@@ -16,8 +18,29 @@ use protocol::{
 
 fn print_free_heap() {
     unsafe {
-        println!("Free heap size: {} bytes", esp_get_free_heap_size());
+        info!("Free heap size: {} bytes", esp_get_free_heap_size());
     }
+}
+
+struct MockServiceDiscovery {}
+
+impl ServiceDiscoveryInterface for MockServiceDiscovery {
+    fn init(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn find_service(&self, service_id: u16) -> Option<std::net::IpAddr> {
+        match service_id {
+            0x01 => Some(std::net::IpAddr::V4(Ipv4Addr::new(192, 168, 178, 152))),
+            _ => None,
+        }
+    }
+
+    fn stop(&mut self) {}
 }
 
 fn main() -> Result<()> {
@@ -33,9 +56,9 @@ fn main() -> Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
 
     let ipv4_client_settings_home = ipv4::ClientSettings {
-        ip: Ipv4Addr::new(192, 168, 0, 6),
+        ip: Ipv4Addr::new(192, 168, 178, 240),
         subnet: ipv4::Subnet {
-            gateway: (Ipv4Addr::new(192, 168, 0, 1)),
+            gateway: (Ipv4Addr::new(192, 168, 178, 1)),
             mask: (ipv4::Mask(24)),
         },
         dns: None,
@@ -59,12 +82,12 @@ fn main() -> Result<()> {
         &sys_loop,
     );
 
-    println!("Baseline heap size:");
+    info!("Baseline heap size:");
     print_free_heap();
 
     let mut app = ServiceApplication::new(0x02);
 
-    app.init()?;
+    app.init_with_discovery(Box::new(MockServiceDiscovery{}))?;
 
     thread::sleep(Duration::from_secs(1));
 
@@ -74,7 +97,7 @@ fn main() -> Result<()> {
         0x01,
         0x02,
         Arc::new(|data| {
-            println!("Received event data: {:?}", data);
+            info!("Received event data  with length: {:?}", data.len());
         }),
     );
 
@@ -96,11 +119,12 @@ fn main() -> Result<()> {
             }),
         );
 
-    println!("Heap size after initialization:");
+    info!("Heap size after initialization:");
     print_free_heap();
 
     loop {
         thread::sleep(Duration::from_secs(1));
+        info!("Heap size in loop:");
         print_free_heap();
     }
 }

@@ -505,7 +505,7 @@ impl ServiceApplication {
         match packet.message_type {
             ApplicationMessageType::Request => self.handle_request_with_sender(packet, addr, response_sender),
             ApplicationMessageType::Response => self.handle_response(packet),
-            ApplicationMessageType::Notification => self.handle_notification(packet),
+            ApplicationMessageType::Notification => self.handle_notification_with_sender(packet, addr, response_sender),
             ApplicationMessageType::Subscribe => self.handle_subscription_with_sender(packet, addr, response_sender),
             ApplicationMessageType::Unsubscribe => self.handle_unsubscription(packet, addr),
             ApplicationMessageType::INVALID => {
@@ -570,11 +570,30 @@ impl ServiceApplication {
         }
     }
 
-    fn handle_notification(&self, packet: ApplicationMessage) {
+    fn handle_notification_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
         trace!("Received Notification Message: {:?}", packet);
         let subscribed_events = self.subscribed_events.lock();
         if let Some(callback) = subscribed_events.get(&packet.method_id) {
             callback(packet.payload);
+        } else {
+            // Client received notification for an event it's not subscribed to
+            // Send unsubscribe message to the sender
+            debug!("Received notification for event {} that we're not subscribed to, sending unsubscribe to {:?}", packet.method_id, addr);
+            
+            let unsubscribe_packet = ApplicationMessage::new(
+                self.service_id,
+                packet.method_id,
+                None,
+                ApplicationMessageType::Unsubscribe,
+                ApplicationMessageReturnCode::Ok,
+                vec![],
+            );
+
+            if let Err(e) = response_sender.send((unsubscribe_packet, addr)) {
+                error!("Failed to send unsubscribe message for unwanted notification: {}", e);
+            } else {
+                debug!("Sent unsubscribe message for event {} to {:?}", packet.method_id, addr);
+            }
         }
     }
 

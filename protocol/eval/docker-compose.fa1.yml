@@ -3,7 +3,7 @@ services:
     build:
       context: .
     environment:
-      - RUST_LOG=trace
+      - RUST_LOG=debug
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s
@@ -15,7 +15,7 @@ services:
     build:
       context: .
     environment:
-      - RUST_LOG=trace
+      - RUST_LOG=debug
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s

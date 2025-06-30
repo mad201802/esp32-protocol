@@ -1,0 +1,9 @@
+services:
+  server:
+    image: rust:1.87-alpine
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ../:/app
+    stop_grace_period: 1s
+    command: sh -c "cd /app && cargo test application::message"

@@ -38,7 +38,7 @@ services:
     volumes:
       - ../target/release/examples:/app
     stop_grace_period: 1s
-    command: timeout 10 /app/eval_nfa6_robustness_client # Timeout after 5 seconds
+    command: timeout 5 /app/eval_nfa6_robustness_client # Timeout after 5 seconds
     privileged: true
     networks:
       - development

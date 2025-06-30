@@ -1,5 +1,5 @@
 use anyhow::Result;
-use log::{error, info, trace};
+use log::{debug, error, info, trace};
 use parking_lot::Mutex;
 use std::{
     collections::HashMap,
@@ -51,7 +51,7 @@ impl ServiceDiscovery {
     /// * `service_id` - Unique identifier for this service instance
     /// * `config` - Configuration parameters for service discovery
     pub fn with_config(service_id: u16, config: ServiceDiscoveryConfig) -> Self {
-        info!("Creating new service discovery with ID: {}", service_id);
+        debug!("Creating new service discovery with ID: {}", service_id);
         Self {
             service_id,
             config,
@@ -132,7 +132,7 @@ impl ServiceDiscovery {
         socket.set_nonblocking(true)
             .map_err(|e| ServiceDiscoveryError::BindFailed(e))?;
 
-        info!("No service ID conflict detected for ID: {}", self.service_id);
+        debug!("No service ID conflict detected for ID: {}", self.service_id);
         Ok(())
     }
 
@@ -260,7 +260,7 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
             })
         };
 
-        info!(
+        debug!(
             "Service discovery receiver thread started with ID: {}",
             self.service_id
         );
@@ -286,7 +286,7 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
             })
         };
 
-        info!(
+        debug!(
             "Service discovery sender thread started with ID: {}",
             self.service_id
         );

@@ -66,21 +66,3 @@ impl From<std::io::Error> for ServiceApplicationError {
 }
 
 pub type Result<T> = std::result::Result<T, ServiceApplicationError>;
-
-/// Health status of the service application
-#[derive(Debug, Clone, PartialEq)]
-pub enum ServiceHealth {
-    Healthy,
-    Degraded { reason: String },
-    Unhealthy { reason: String },
-}
-
-/// Service application metrics
-#[derive(Debug, Default, Clone)]
-pub struct ServiceMetrics {
-    pub active_connections: usize,
-    pub total_requests: u64,
-    pub failed_requests: u64,
-    pub total_events_sent: u64,
-    pub open_subscriptions: usize,
-}

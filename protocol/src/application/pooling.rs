@@ -18,12 +18,8 @@ use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 use super::message::{ApplicationMessage, RawMessageData};
 
 // Constants for TCP handling
-const MAX_CLIENTS: usize = 8;
-const MAX_SOCKETS: usize = 8;
 const CLIENT_BUFFER_SIZE: usize = 256;
 const TEMP_BUFFER_SIZE: usize = 256;
-const SLEEP_INTERVAL_MS: u64 = 10;
-const READ_TIMEOUT_MS: u64 = 100;
 
 /// TCP Connection Pool for managing client connections and message routing
 pub struct TcpConnectionPool {
@@ -44,6 +40,10 @@ pub struct TcpConnectionPool {
     /// Server configuration
     bind_addr: IpAddr,
     port: u16,
+    /// Maximum number of sockets and clients
+    max_sockets: usize,
+    /// Maximum number of clients that can be connected at once
+    max_clients: usize,
     
     /// Server control
     server_running: Arc<AtomicBool>,
@@ -53,19 +53,21 @@ pub struct TcpConnectionPool {
 
 impl TcpConnectionPool {
     /// Create a new TCP connection pool
-    pub fn new(bind_addr: IpAddr, port: u16) -> Self {
+    pub fn new(bind_addr: IpAddr, port: u16, max_sockets: usize, max_clients: usize) -> Self {
         let (message_process_tx, message_process_rx) = channel::bounded(32);
         let (client_response_tx, client_response_rx) = channel::bounded(32);
         
         Self {
-            connected_sockets: Arc::new(Mutex::new(HashSet::with_capacity(MAX_SOCKETS))),
-            client_senders: Arc::new(Mutex::new(HashMap::with_capacity(MAX_CLIENTS))),
+            connected_sockets: Arc::new(Mutex::new(HashSet::with_capacity(max_sockets))),
+            client_senders: Arc::new(Mutex::new(HashMap::with_capacity(max_clients))),
             message_process_tx,
             message_process_rx: Some(message_process_rx),
             client_response_tx,
             client_response_rx: Some(client_response_rx),
             bind_addr,
             port,
+            max_sockets,
+            max_clients,
             server_running: Arc::new(AtomicBool::new(false)),
             server_thread: None,
             message_distributor_thread: None,
@@ -180,6 +182,8 @@ impl TcpConnectionPool {
             client_response_rx: None,
             bind_addr: self.bind_addr,
             port: self.port,
+            max_sockets: self.max_sockets,
+            max_clients: self.max_clients,
             server_running: Arc::clone(&self.server_running),
             server_thread: None,
             message_distributor_thread: None,
@@ -272,7 +276,7 @@ impl TcpConnectionPool {
                 break;
             }
 
-            thread::sleep(Duration::from_millis(SLEEP_INTERVAL_MS));
+            thread::sleep(Duration::from_millis(10));
         }
         Ok(())
     }
@@ -281,7 +285,7 @@ impl TcpConnectionPool {
     fn register_client(&self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
         {
             let mut client_senders = self.client_senders.lock();
-            if client_senders.len() >= MAX_CLIENTS {
+            if client_senders.len() >= self.max_clients {
                 return Err(anyhow::anyhow!("Maximum client connections reached"));
             }
             client_senders.insert(ip, sender);
@@ -289,7 +293,7 @@ impl TcpConnectionPool {
 
         {
             let mut connected_sockets = self.connected_sockets.lock();
-            if connected_sockets.len() >= MAX_SOCKETS {
+            if connected_sockets.len() >= self.max_sockets {
                 return Err(anyhow::anyhow!("Maximum socket connections reached"));
             }
             connected_sockets.insert(ip);
@@ -354,7 +358,7 @@ impl TcpConnectionPool {
     /// Message distributor that forwards messages from the global response channel to client-specific channels
     fn message_distributor(&self, client_response_rx: Receiver<RawMessageData>) -> Result<()> {
         while self.server_running.load(Ordering::SeqCst) {
-            match client_response_rx.recv_timeout(Duration::from_millis(READ_TIMEOUT_MS)) {
+            match client_response_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok((msg, target_addr)) => {
                     let client_senders = self.client_senders.lock();
                     if let Some(client_sender) = client_senders.get(&target_addr) {

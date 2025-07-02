@@ -133,4 +133,8 @@ RUST_LOG=debug cargo run --example _dev_server
 
 ---
 
+## KI-Disclaimer
+
+Im Rahmen dieser Bachelorarbeit wurde bei der Entwicklung des Codes das KI-gestützte Tool [GitHub Copilot](https://github.com/features/copilot) verwendet. Vorschläge und Code-Snippets von GitHub Copilot wurden geprüft, angepasst und in eigenen Kontext eingebettet. Die finale Verantwortung für den gesamten Code und dessen Funktionsweise liegt beim Autor dieser Arbeit.
+
 *Dieses Projekt wurde im Rahmen der Abschlussarbeit "Implementierung und Evaluation eines Kommunikationsmodells auf ESP32-basierten Ethernet-Netzwerken innerhalb eines Elektro-Gokarts" entwickelt.*

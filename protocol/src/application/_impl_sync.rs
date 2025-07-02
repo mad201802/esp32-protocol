@@ -14,12 +14,6 @@ use log::{debug, error, info, trace};
 use parking_lot::Mutex;
 use crossbeam::channel::{self, Receiver, TryRecvError};
 
-// Constants for ESP32 optimization
-const MAX_OPEN_REQUESTS: usize = 16;
-const SUBSCRIPTION_TIMEOUT_MS: u64 = 1000;
-const SLEEP_INTERVAL_MS: u64 = 10;
-const REQUEST_TIMEOUT_CHECK_INTERVAL_MS: u64 = 1000;
-
 // Error codes for consistent error handling
 const ERROR_CODE_EVENT_NOT_OFFERED: u8 = 0x02;
 const ERROR_CODE_METHOD_NOT_FOUND: u8 = 0x03;
@@ -105,6 +99,8 @@ impl ServiceApplication {
     pub fn with_config(service_id: u16, config: ServiceApplicationConfig) -> Self {
         info!("Creating new service application with ID: {}", service_id);
 
+        let max_open_requests = config.max_open_requests;
+
         Self {
             service_id,
             config,
@@ -115,7 +111,7 @@ impl ServiceApplication {
             offered_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
             subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
             offered_methods: HashMap::with_capacity(8),
-            open_requests: Arc::new(Mutex::new(HashMap::with_capacity(MAX_OPEN_REQUESTS))),
+            open_requests: Arc::new(Mutex::new(HashMap::with_capacity(max_open_requests))),
 
             message_handler_thread: None,
             timeout_handler_thread: None,
@@ -144,12 +140,17 @@ impl ServiceApplication {
     }
 
     /// Offer a method to the service
+    /// # Arguments
+    /// * `method_id` - ID of the method to offer
+    /// * `callback` - Function to handle method invocation
     pub fn offer_method(&mut self, method_id: u16, callback: MethodInvokeCallback) {
         self.offered_methods.insert(method_id, callback);
         trace!("Method {} offered", method_id);
     }
 
     /// Offer a event to the service
+    /// # Arguments
+    /// * `event_id` - ID of the event to offer
     pub fn offer_event(&mut self, event_id: u16) {
         self.offered_events
             .lock()
@@ -198,7 +199,6 @@ impl ServiceApplication {
 
     fn service_to_ip(&mut self, service_id: u16) -> Option<IpAddr> {
         // Check if we can get the ip address of the service
-
         trace!("Finding service with ID: {}", service_id);
 
         let service_discovery = self.service_discovery.as_ref().unwrap();
@@ -208,7 +208,6 @@ impl ServiceApplication {
             500,
         );
 
-        // If we dont have the ip, return None
         if ip_addr.is_none() {
             error!("Could not find service with ID: {}", service_id);
             return None;
@@ -216,7 +215,6 @@ impl ServiceApplication {
 
         trace!("Found service with ID: {} at {:?}", service_id, ip_addr);
 
-        // If we have the ip, check if we have a open socket
         let ip_addr = ip_addr.unwrap();
 
         if let Some(tcp_pool) = &self.tcp_pool {
@@ -434,7 +432,7 @@ impl ServiceApplication {
         // Store the response sender in open_requests
         {
             let mut open_requests = self.open_requests.lock();
-            let deadline = Instant::now() + Duration::from_millis(SUBSCRIPTION_TIMEOUT_MS);
+            let deadline = Instant::now() + self.config.subscription_timeout;
             let request_timeout = RequestTimeout {
                 callback: Arc::new(move |result| {
                     let _ = response_tx.try_send(result);
@@ -446,7 +444,7 @@ impl ServiceApplication {
         }
         
         // Wait for response with timeout
-        let timeout_duration = Duration::from_millis(SUBSCRIPTION_TIMEOUT_MS);
+        let timeout_duration = self.config.subscription_timeout;
         let start_time = Instant::now();
         
         loop {
@@ -468,7 +466,7 @@ impl ServiceApplication {
                     return None;
                 }
                 Err(TryRecvError::Empty) => {
-                    thread::sleep(Duration::from_millis(SLEEP_INTERVAL_MS));
+                    thread::sleep(self.config.sleep_interval);
                     continue;
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -655,6 +653,8 @@ impl ServiceApplication {
         let mut tcp_pool = TcpConnectionPool::new(
             self.config.bind_addr,
             self.config.port,
+            self.config.max_sockets,
+            self.config.max_clients,
         );
         
         // Get the message receiver from the TCP pool for our message handler
@@ -780,7 +780,7 @@ impl ServiceApplication {
                 let _result = callback(Err(timeout_error));
             }
             
-            thread::sleep(Duration::from_millis(REQUEST_TIMEOUT_CHECK_INTERVAL_MS));
+            thread::sleep(self.config.request_timeout_check_interval);
         }
     }
 

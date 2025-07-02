@@ -17,7 +17,7 @@ use super::{
     error::ServiceDiscoveryError,
 };
 
-// Service discovery packets are small (3 bytes), but we allow some buffer for network overhead
+// Service discovery packets are small (3 bytes), but allow some buffer for network overhead
 const SD_RECV_BUFFER_SIZE: usize = 64;
 
 #[derive(Debug, Clone)]

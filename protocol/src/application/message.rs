@@ -59,7 +59,6 @@ impl From<u8> for ApplicationMessageReturnCode {
     }
 }
 
-// TODO: Maybe get rid of the string and just use a error code
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApplicationResponseErrorMessage {
     pub error_code: u8,
@@ -97,7 +96,7 @@ impl ApplicationResponseErrorMessage {
 
 }
 
-/// Represents a message in the custom protocol
+/// Represents a message in the protocol
 #[derive(Debug, Clone, PartialEq)]
 pub struct ApplicationMessage {
     pub service_id: u16,

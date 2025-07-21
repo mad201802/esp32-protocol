@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, HashSet},
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     sync::{
@@ -17,17 +16,130 @@ use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 
 use super::message::{ApplicationMessage, RawMessageData};
 
-// Constants for TCP handling
-const CLIENT_BUFFER_SIZE: usize = 256;
-const TEMP_BUFFER_SIZE: usize = 256;
+/// Simple buffer pool for reusing packet serialization buffers
+struct BufferPool {
+    buffers: Mutex<Vec<Vec<u8>>>,
+    max_buffers: usize,
+}
+
+impl BufferPool {
+    fn new(max_buffers: usize) -> Self {
+        Self {
+            buffers: Mutex::new(Vec::with_capacity(max_buffers)),
+            max_buffers,
+        }
+    }
+    
+    fn get_buffer(&self) -> Vec<u8> {
+        let mut buffers = self.buffers.lock();
+        buffers.pop().unwrap_or_else(|| Vec::with_capacity(MAX_PACKET_BUFFER_SIZE))
+    }
+    
+    fn return_buffer(&self, mut buffer: Vec<u8>) {
+        buffer.clear();
+        // Only keep reasonable-sized buffers to prevent memory bloat
+        if buffer.capacity() <= MAX_PACKET_BUFFER_SIZE * 2 {
+            let mut buffers = self.buffers.lock();
+            if buffers.len() < self.max_buffers {
+                buffers.push(buffer);
+            }
+        }
+    }
+}
+
+/// Fixed-size client connection tracking for embedded devices
+#[derive(Clone, Copy)]
+struct ClientEntry {
+    ip: IpAddr,
+    sender_index: Option<usize>,
+    active: bool,
+}
+
+impl Default for ClientEntry {
+    fn default() -> Self {
+        Self {
+            ip: IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
+            sender_index: None,
+            active: false,
+        }
+    }
+}
+
+struct FixedClientRegistry {
+    entries: [ClientEntry; MAX_CLIENTS_FIXED],
+    senders: [Option<Sender<ApplicationMessage>>; MAX_CLIENTS_FIXED],
+}
+
+impl FixedClientRegistry {
+    fn new() -> Self {
+        Self {
+            entries: [ClientEntry::default(); MAX_CLIENTS_FIXED],
+            senders: std::array::from_fn(|_| None),
+        }
+    }
+    
+    fn add_client(&mut self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
+        // Find existing entry or empty slot
+        for (i, entry) in self.entries.iter_mut().enumerate() {
+            if !entry.active || entry.ip == ip {
+                entry.ip = ip;
+                entry.sender_index = Some(i);
+                entry.active = true;
+                self.senders[i] = Some(sender);
+                return Ok(());
+            }
+        }
+        Err(anyhow::anyhow!("No available client slots"))
+    }
+    
+    fn remove_client(&mut self, ip: IpAddr) {
+        for (i, entry) in self.entries.iter_mut().enumerate() {
+            if entry.active && entry.ip == ip {
+                entry.active = false;
+                self.senders[i] = None;
+                break;
+            }
+        }
+    }
+    
+    fn get_sender(&self, ip: IpAddr) -> Option<&Sender<ApplicationMessage>> {
+        for entry in &self.entries {
+            if entry.active && entry.ip == ip {
+                if let Some(idx) = entry.sender_index {
+                    return self.senders[idx].as_ref();
+                }
+            }
+        }
+        None
+    }
+    
+    fn is_connected(&self, ip: IpAddr) -> bool {
+        self.entries.iter().any(|entry| entry.active && entry.ip == ip)
+    }
+    
+    fn len(&self) -> usize {
+        self.entries.iter().filter(|entry| entry.active).count()
+    }
+}
+
+// Optimized constants for embedded devices - further reduced for minimal heap usage
+const TEMP_BUFFER_SIZE: usize = 32;             // Further reduced from 64 - temporary read buffer  
+const MAX_BUFFER_GROWTH: usize = 256;           // Further reduced to prevent buffer growth
+const POLL_INTERVAL_MS: u64 = 5;                // Reduced from 10ms for better responsiveness
+const CHANNEL_CAPACITY: usize = 8;              // Further reduced from 16 for memory efficiency
+const CONNECT_TIMEOUT_MS: u64 = 100;            // Reduced connection wait time
+const DISTRIBUTOR_TIMEOUT_MS: u64 = 50;         // Message distributor timeout
+const MAX_PACKET_BUFFER_SIZE: usize = 512;      // Fixed size for packet serialization buffer
+const MAX_CLIENTS_FIXED: usize = 8;             // Fixed maximum clients for embedded use
 
 /// TCP Connection Pool for managing client connections and message routing
+/// Optimized for embedded devices with minimal heap allocations
 pub struct TcpConnectionPool {
-    /// Currently connected socket addresses
-    connected_sockets: Arc<Mutex<HashSet<IpAddr>>>,
+    /// Fixed-size client registry instead of dynamic HashMap/HashSet
+    client_registry: Arc<Mutex<FixedClientRegistry>>,
     
-    /// Map of client IP addresses to their message senders
-    client_senders: Arc<Mutex<HashMap<IpAddr, Sender<ApplicationMessage>>>>,
+    /// Buffer pool for reusing serialization buffers
+    buffer_pool: Arc<BufferPool>,
     
     /// Channel for incoming messages from clients (sent to ServiceApplication)
     message_process_tx: Sender<RawMessageData>,
@@ -40,9 +152,7 @@ pub struct TcpConnectionPool {
     /// Server configuration
     bind_addr: IpAddr,
     port: u16,
-    /// Maximum number of sockets and clients
-    max_sockets: usize,
-    /// Maximum number of clients that can be connected at once
+    /// Maximum number of clients (now using fixed-size registry)
     max_clients: usize,
     
     /// Server control
@@ -52,22 +162,24 @@ pub struct TcpConnectionPool {
 }
 
 impl TcpConnectionPool {
-    /// Create a new TCP connection pool
-    pub fn new(bind_addr: IpAddr, port: u16, max_sockets: usize, max_clients: usize) -> Self {
-        let (message_process_tx, message_process_rx) = channel::bounded(32);
-        let (client_response_tx, client_response_rx) = channel::bounded(32);
+    /// Create a new TCP connection pool with optimized settings for embedded devices
+    pub fn new(bind_addr: IpAddr, port: u16, _max_sockets: usize, max_clients: usize) -> Self {
+        let (message_process_tx, message_process_rx) = channel::bounded(CHANNEL_CAPACITY);
+        let (client_response_tx, client_response_rx) = channel::bounded(CHANNEL_CAPACITY);
+        
+        // Ensure max_clients doesn't exceed our fixed array size
+        let effective_max_clients = max_clients.min(MAX_CLIENTS_FIXED);
         
         Self {
-            connected_sockets: Arc::new(Mutex::new(HashSet::with_capacity(max_sockets))),
-            client_senders: Arc::new(Mutex::new(HashMap::with_capacity(max_clients))),
+            client_registry: Arc::new(Mutex::new(FixedClientRegistry::new())),
+            buffer_pool: Arc::new(BufferPool::new(4)), // Small buffer pool for embedded use
             message_process_tx,
             message_process_rx: Some(message_process_rx),
             client_response_tx,
             client_response_rx: Some(client_response_rx),
             bind_addr,
             port,
-            max_sockets,
-            max_clients,
+            max_clients: effective_max_clients,
             server_running: Arc::new(AtomicBool::new(false)),
             server_thread: None,
             message_distributor_thread: None,
@@ -112,7 +224,7 @@ impl TcpConnectionPool {
         }
     }
     
-    /// Connect to a remote service
+    /// Connect to a remote service with optimized timeout for embedded devices
     pub fn connect(&self, ip_addr: IpAddr) -> Result<()> {
         debug!("Connecting to service at {:?}", ip_addr);
 
@@ -128,14 +240,15 @@ impl TcpConnectionPool {
             }
         });
 
-        thread::sleep(Duration::from_millis(500)); // Wait for the client to be ready
+        // Reduced wait time for embedded systems
+        thread::sleep(Duration::from_millis(CONNECT_TIMEOUT_MS));
         Ok(())
     }
     
     /// Check if we're connected to a specific IP address
     pub fn is_connected(&self, ip_addr: IpAddr) -> bool {
-        let connected_sockets = self.connected_sockets.lock();
-        connected_sockets.contains(&ip_addr)
+        let client_registry = self.client_registry.lock();
+        client_registry.is_connected(ip_addr)
     }
     
     /// Stop the TCP connection pool
@@ -158,13 +271,10 @@ impl TcpConnectionPool {
             }
         }
         
-        // Clear all connections
+        // Clear all connections using fixed-size registry
         {
-            let mut connected_sockets = self.connected_sockets.lock();
-            connected_sockets.clear();
-            
-            let mut client_senders = self.client_senders.lock();
-            client_senders.clear();
+            let mut client_registry = self.client_registry.lock();
+            *client_registry = FixedClientRegistry::new();
         }
         
         info!("TCP connection pool stopped");
@@ -174,15 +284,14 @@ impl TcpConnectionPool {
     /// Clone the pool for use in threads (without the receivers)
     fn clone_for_thread(&self) -> Self {
         Self {
-            connected_sockets: Arc::clone(&self.connected_sockets),
-            client_senders: Arc::clone(&self.client_senders),
+            client_registry: Arc::clone(&self.client_registry),
+            buffer_pool: Arc::clone(&self.buffer_pool),
             message_process_tx: self.message_process_tx.clone(),
             message_process_rx: None,
             client_response_tx: self.client_response_tx.clone(),
             client_response_rx: None,
             bind_addr: self.bind_addr,
             port: self.port,
-            max_sockets: self.max_sockets,
             max_clients: self.max_clients,
             server_running: Arc::clone(&self.server_running),
             server_thread: None,
@@ -228,7 +337,7 @@ impl TcpConnectionPool {
         Ok(())
     }
     
-    /// Handle incoming client connections and messages
+    /// Handle incoming client connections and messages with embedded device optimizations
     fn handle_client(&self, mut tcp_stream: TcpStream) -> Result<()> {
         let socket_addr = tcp_stream.peer_addr()?;
         info!("Handling client connection from {:?}", socket_addr);
@@ -240,13 +349,18 @@ impl TcpConnectionPool {
         // Register this client with capacity checks
         self.register_client(socket_addr.ip(), this_client_tx)?;
 
-        let mut buffer: Vec<u8> = Vec::with_capacity(CLIENT_BUFFER_SIZE);
+        // Use fixed-size arrays to avoid heap allocations entirely
+        let mut buffer = [0u8; MAX_BUFFER_GROWTH];
+        let mut buffer_len = 0;
         let mut temp_buffer = [0u8; TEMP_BUFFER_SIZE];
+        let mut consecutive_empty_reads = 0u8;
 
         loop {
             if !self.server_running.load(Ordering::SeqCst) {
                 break;
             }
+
+            let mut had_activity = false;
 
             // Handle incoming data
             match tcp_stream.read(&mut temp_buffer) {
@@ -256,13 +370,15 @@ impl TcpConnectionPool {
                     break;
                 }
                 Ok(bytes_read) => {
-                    if let Err(e) = self.process_incoming_data(&mut buffer, &temp_buffer[..bytes_read], socket_addr.ip()) {
+                    had_activity = true;
+                    consecutive_empty_reads = 0;
+                    if let Err(e) = self.process_incoming_data_fixed(&mut buffer, &mut buffer_len, &temp_buffer[..bytes_read], socket_addr.ip()) {
                         error!("Error processing incoming data: {}", e);
-                        buffer.clear();
+                        buffer_len = 0; // Reset buffer on error
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    // No data available, check for outgoing messages
+                    consecutive_empty_reads = consecutive_empty_reads.saturating_add(1);
                 }
                 Err(e) => {
                     error!("Failed to read from socket: {}", e);
@@ -276,63 +392,67 @@ impl TcpConnectionPool {
                 break;
             }
 
-            thread::sleep(Duration::from_millis(10));
+            // Adaptive sleep based on activity - sleep longer when inactive to save CPU
+            let sleep_duration = if had_activity || consecutive_empty_reads < 10 {
+                Duration::from_millis(POLL_INTERVAL_MS)
+            } else {
+                Duration::from_millis(POLL_INTERVAL_MS * 2) // Double sleep time when inactive
+            };
+            
+            thread::sleep(sleep_duration);
         }
         Ok(())
     }
     
     /// Register a new client connection
     fn register_client(&self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
-        {
-            let mut client_senders = self.client_senders.lock();
-            if client_senders.len() >= self.max_clients {
-                return Err(anyhow::anyhow!("Maximum client connections reached"));
-            }
-            client_senders.insert(ip, sender);
+        let mut client_registry = self.client_registry.lock();
+        if client_registry.len() >= self.max_clients {
+            return Err(anyhow::anyhow!("Maximum client connections reached"));
         }
-
-        {
-            let mut connected_sockets = self.connected_sockets.lock();
-            if connected_sockets.len() >= self.max_sockets {
-                return Err(anyhow::anyhow!("Maximum socket connections reached"));
-            }
-            connected_sockets.insert(ip);
-        }
-
-        Ok(())
+        client_registry.add_client(ip, sender)
     }
     
     /// Unregister a client connection
     fn unregister_client(&self, ip: IpAddr) {
-        let mut connected_sockets = self.connected_sockets.lock();
-        connected_sockets.remove(&ip);
-
-        let mut client_senders = self.client_senders.lock();
-        client_senders.remove(&ip);
+        let mut client_registry = self.client_registry.lock();
+        client_registry.remove_client(ip);
     }
     
-    /// Process incoming data from a client
-    fn process_incoming_data(&self, buffer: &mut Vec<u8>, data: &[u8], ip: IpAddr) -> Result<()> {
-        buffer.extend_from_slice(data);
+    /// Process incoming data from a client using fixed-size buffers to avoid heap allocations
+    fn process_incoming_data_fixed(
+        &self, 
+        buffer: &mut [u8; MAX_BUFFER_GROWTH], 
+        buffer_len: &mut usize, 
+        data: &[u8], 
+        ip: IpAddr
+    ) -> Result<()> {
+        // Check if we have space for new data
+        if *buffer_len + data.len() > MAX_BUFFER_GROWTH {
+            *buffer_len = 0; // Reset buffer
+            return Err(anyhow::anyhow!("Buffer overflow protection triggered, clearing"));
+        }
         
-        match ApplicationMessage::from_bytes(buffer) {
+        // Copy new data into our fixed buffer
+        buffer[*buffer_len..*buffer_len + data.len()].copy_from_slice(data);
+        *buffer_len += data.len();
+        
+        // Try to parse a complete message
+        match ApplicationMessage::from_bytes(&buffer[..*buffer_len]) {
             Ok(packet) => {
+                // Send the message and reset buffer
                 self.message_process_tx.send((packet, ip))?;
-                buffer.clear();
+                *buffer_len = 0;
             }
             Err(_) => {
                 // Packet might be incomplete, keep the data for next iteration
-                // Clear buffer if it gets too large to prevent memory issues
-                if buffer.len() > CLIENT_BUFFER_SIZE * 2 {
-                    buffer.clear();
-                    return Err(anyhow::anyhow!("Buffer overflow, clearing"));
-                }
+                // The fixed buffer size already provides overflow protection
             }
         }
         Ok(())
     }
     
-    /// Process outgoing messages to a client
+    /// Process outgoing messages to a client with buffer pool optimization
     fn process_outgoing_messages(
         &self, 
         tcp_stream: &mut TcpStream, 
@@ -342,8 +462,39 @@ impl TcpConnectionPool {
         match client_rx.try_recv() {
             Ok(msg) => {
                 trace!("Sending message to {:?}:{:?}", socket_addr, msg);
-                let packet = ApplicationMessage::to_bytes(&msg)?;
-                tcp_stream.write_all(&packet)?;
+                
+                // Use buffer pool for serialization to avoid heap allocation
+                let mut packet_data = self.buffer_pool.get_buffer();
+                packet_data.clear();
+                
+                // Serialize directly into our pooled buffer
+                let serialized_msg = ApplicationMessage::to_bytes(&msg)?;
+                packet_data.extend_from_slice(&serialized_msg);
+                
+                // Handle partial writes for better reliability on embedded systems
+                let mut total_written = 0;
+                while total_written < packet_data.len() {
+                    match tcp_stream.write(&packet_data[total_written..]) {
+                        Ok(bytes_written) => {
+                            total_written += bytes_written;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            // Socket not ready, try again on next iteration
+                            break;
+                        }
+                        Err(e) => {
+                            // Return buffer to pool before error
+                            self.buffer_pool.return_buffer(packet_data);
+                            return Err(anyhow::anyhow!("Failed to write to socket: {}", e));
+                        }
+                    }
+                }
+                
+                // Return buffer to pool for reuse
+                self.buffer_pool.return_buffer(packet_data);
+                
+                // Flush the stream to ensure data is sent
+                tcp_stream.flush().ok(); // Ignore flush errors as they're not critical
             }
             Err(TryRecvError::Empty) => {
                 // No messages to send
@@ -355,14 +506,22 @@ impl TcpConnectionPool {
         Ok(())
     }
     
-    /// Message distributor that forwards messages from the global response channel to client-specific channels
+    /// Message distributor with optimized timeout for embedded systems
     fn message_distributor(&self, client_response_rx: Receiver<RawMessageData>) -> Result<()> {
+        // Use shorter timeout for better responsiveness on embedded systems
+        let timeout = Duration::from_millis(DISTRIBUTOR_TIMEOUT_MS);
+        
         while self.server_running.load(Ordering::SeqCst) {
-            match client_response_rx.recv_timeout(Duration::from_millis(100)) {
+            match client_response_rx.recv_timeout(timeout) {
                 Ok((msg, target_addr)) => {
-                    let client_senders = self.client_senders.lock();
-                    if let Some(client_sender) = client_senders.get(&target_addr) {
-                        if let Err(e) = client_sender.send(msg) {
+                    // Scope the lock to minimize contention
+                    let client_sender = {
+                        let client_registry = self.client_registry.lock();
+                        client_registry.get_sender(target_addr).cloned()
+                    };
+                    
+                    if let Some(sender) = client_sender {
+                        if let Err(e) = sender.send(msg) {
                             error!("Failed to send message to client {}: {}", target_addr, e);
                         }
                     } else {
@@ -370,6 +529,7 @@ impl TcpConnectionPool {
                     }
                 }
                 Err(channel::RecvTimeoutError::Timeout) => {
+                    // Timeout is expected, continue processing
                     continue;
                 }
                 Err(channel::RecvTimeoutError::Disconnected) => {

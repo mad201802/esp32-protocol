@@ -36,7 +36,7 @@ impl ServiceDiscoveryConfig {
             multicast_addr: Ipv4Addr::new(239, 255, 0, 1),
             port: 30490,
             // More conservative broadcast interval to save bandwidth and power
-            broadcast_interval: Duration::from_secs(5),
+            broadcast_interval: Duration::from_secs(2),
             socket_timeout: Duration::from_secs(3),
             // Shorter TTL for faster cleanup
             service_ttl: Duration::from_secs(10),

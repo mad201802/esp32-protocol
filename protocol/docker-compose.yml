@@ -1,25 +1,23 @@
 services:
   server:
-    build:
-      args:
-        TARGET: _dev_server
+    image: ubuntu:22.04
     environment:
       - RUST_LOG=debug
-    stop_grace_period: 1s
+    volumes:
+      - ./target/release/examples:/app
+    command: /app/_dev_server
     networks:
       - development
     
   client:
-    build:
-      args:
-        TARGET: _dev_client
+    image: ubuntu:22.04
     environment:
       - RUST_LOG=debug
-    stop_grace_period: 1s
+    volumes:
+      - ./target/release/examples:/app
+    command: /app/_dev_client
     networks:
       - development
-    depends_on:
-      - server
 
 networks:
   development:

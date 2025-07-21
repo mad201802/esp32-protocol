@@ -11,6 +11,7 @@ pub struct ServiceDiscoveryConfig {
     pub socket_timeout: Duration,
     /// Time-to-live for discovered services (removes stale entries)
     pub service_ttl: Duration,
+    pub collision_detection: bool,
 }
 
 impl Default for ServiceDiscoveryConfig {
@@ -24,6 +25,7 @@ impl Default for ServiceDiscoveryConfig {
             socket_timeout: Duration::from_secs(5),
             // Shorter TTL for faster cleanup on resource-constrained devices
             service_ttl: Duration::from_secs(6),
+            collision_detection: true, // Enable collision detection by default
         }
     }
 }
@@ -40,6 +42,7 @@ impl ServiceDiscoveryConfig {
             socket_timeout: Duration::from_secs(3),
             // Shorter TTL for faster cleanup
             service_ttl: Duration::from_secs(10),
+            collision_detection: true, // Enable collision detection to avoid conflicts
         }
     }
 }

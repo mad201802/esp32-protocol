@@ -311,6 +311,13 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
 
         info!("Starting service discovery with ID: {}", self.service_id);
 
+        if self.config.collision_detection {
+            // Check for service ID conflicts before starting
+            if let Err(conflict_err) = self.check_service_id_conflict() {
+                return Err(anyhow::anyhow!("Service ID conflict: {}", conflict_err));
+            }
+        }
+
         // Check for service ID conflicts before starting
         if let Err(conflict_err) = self.check_service_id_conflict() {
             return Err(anyhow::anyhow!("Service ID conflict: {}", conflict_err));

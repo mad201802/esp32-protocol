@@ -55,25 +55,90 @@ fn main() -> Result<()> {
 
     thread::sleep(Duration::from_secs(1));
 
-    app.offer_event(0x01); // Button pressed event
-
     app.start(false)?;
 
-    // The button is on gpio15 and we want to notify if the button is pressed
+    // Set up all three buttons
+    // Button 1: gpio15 for method_id 0x01
     let gpio15 = pins.gpio15;
-    let button_pin = Arc::new(Mutex::new(PinDriver::input(gpio15).unwrap()));
-    let button_pin_clone = Arc::clone(&button_pin);
+    let button1_pin = Arc::new(Mutex::new(PinDriver::input(gpio15).unwrap()));
+    let button1_pin_clone = Arc::clone(&button1_pin);
+
+    // Button 2: gpio14 for method_id 0x02
+    let gpio14 = pins.gpio14;
+    let button2_pin = Arc::new(Mutex::new(PinDriver::input(gpio14).unwrap()));
+    let button2_pin_clone = Arc::clone(&button2_pin);
+
+    // Button 3: gpio32 for method_id 0x03
+    let gpio32 = pins.gpio32;
+    let button3_pin = Arc::new(Mutex::new(PinDriver::input(gpio32).unwrap()));
+    let button3_pin_clone = Arc::clone(&button3_pin);
+
+    // Track the previous physical state of all buttons to detect presses
+    let mut button1_previous_state = false;
+    let mut button2_previous_state = false;
+    let mut button3_previous_state = false;
+
+    // Track the virtual switch state for all buttons
+    let mut button1_switch_state = false;
+    let mut button2_switch_state = false;
+    let mut button3_switch_state = false;
 
     loop {
-        let mut button_pin = button_pin_clone.lock().unwrap();
-        if button_pin.is_high() {
-            println!("Button pressed!");
-            app.notify(0x01, vec![0x01]); // Notify that the button is pressed
-        } else {
-            println!("Button released!");
-            app.notify(0x01, vec![0x00]); // Notify that the button is released
+        // Handle Button 1 (GPIO15 -> method_id 0x01)
+        let button1_pin = button1_pin_clone.lock().unwrap();
+        let button1_current_state = button1_pin.is_high();
+        
+        if button1_current_state && !button1_previous_state {
+            button1_switch_state = !button1_switch_state;
+            
+            if button1_switch_state {
+                println!("Button 1 Switch ON (GPIO15)");
+                app.call_method(0x01, 0x01, vec![0x01], Arc::new(move |_payload| {Ok(vec![0x01])}));
+            } else {
+                println!("Button 1 Switch OFF (GPIO15)");
+                app.call_method(0x01, 0x01, vec![0x00], Arc::new(move |_payload| {Ok(vec![0x01])}));
+            }
         }
-        thread::sleep(Duration::from_millis(100)); // Polling interval
+        button1_previous_state = button1_current_state;
+        drop(button1_pin); // Release the lock
+
+        // Handle Button 2 (GPIO14 -> method_id 0x02)
+        let button2_pin = button2_pin_clone.lock().unwrap();
+        let button2_current_state = button2_pin.is_high();
+        
+        if button2_current_state && !button2_previous_state {
+            button2_switch_state = !button2_switch_state;
+            
+            if button2_switch_state {
+                println!("Button 2 Switch ON (GPIO14)");
+                app.call_method(0x01, 0x02, vec![0x01], Arc::new(move |_payload| {Ok(vec![0x01])}));
+            } else {
+                println!("Button 2 Switch OFF (GPIO14)");
+                app.call_method(0x01, 0x02, vec![0x00], Arc::new(move |_payload| {Ok(vec![0x01])}));
+            }
+        }
+        button2_previous_state = button2_current_state;
+        drop(button2_pin); // Release the lock
+
+        // Handle Button 3 (GPIO32 -> method_id 0x03)
+        let button3_pin = button3_pin_clone.lock().unwrap();
+        let button3_current_state = button3_pin.is_high();
+        
+        if button3_current_state && !button3_previous_state {
+            button3_switch_state = !button3_switch_state;
+            
+            if button3_switch_state {
+                println!("Button 3 Switch ON (GPIO32)");
+                app.call_method(0x01, 0x03, vec![0x01], Arc::new(move |_payload| {Ok(vec![0x01])}));
+            } else {
+                println!("Button 3 Switch OFF (GPIO32)");
+                app.call_method(0x01, 0x03, vec![0x00], Arc::new(move |_payload| {Ok(vec![0x01])}));
+            }
+        }
+        button3_previous_state = button3_current_state;
+        drop(button3_pin); // Release the lock
+        
+        thread::sleep(Duration::from_millis(10)); // Polling interval
     }
 
 

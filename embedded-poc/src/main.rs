@@ -80,8 +80,8 @@ fn main() -> Result<()> {
     app.start(false)?;
 
     loop {
-        // Use smaller allocations for ESP32
+        // Use smaller allocations for ESP32 and reduce frequency
         app.notify(0x02, vec![0xba, 0xbe, 0xef]);
-        thread::sleep(Duration::from_millis(500)); // Reduce frequency to prevent memory pressure
+        thread::sleep(Duration::from_millis(2000)); // Increased from 500ms to 2000ms to reduce memory pressure
     }
 }

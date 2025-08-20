@@ -1,21 +1,14 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::{env::set_var, net::Ipv4Addr};
+use std::net::Ipv4Addr;
 
 use anyhow::Result;
 use embedded_poc::eth::start_eth;
+use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::log::EspLogger;
-use esp_idf_svc::hal::sys;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
-use esp_idf_sys::{esp, esp_get_free_heap_size, uxTaskGetStackHighWaterMark, xTaskGetCurrentTaskHandle};
-use protocol::{
-    application::{
-        _impl_sync::ServiceApplication, config::ServiceApplicationConfig,
-        message::ApplicationResponseErrorMessage,
-    },
-    sd::config::ServiceDiscoveryConfig,
-};
+use protocol::application::_impl_sync::ServiceApplication;
 
 fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -39,28 +32,22 @@ fn main() -> Result<()> {
         secondary_dns: None,
     };
 
-    unsafe {
-        // Print the free heap size for debugging purposes
-        println!("Free heap size: {} bytes", esp_get_free_heap_size());
-        println!("Stack high water mark: {} bytes", uxTaskGetStackHighWaterMark(xTaskGetCurrentTaskHandle()));
-    }
-
-    // let (_lan_power, _eth) = start_eth(
-    //     Some(ipv4_client_settings_home),
-    //     p.mac,
-    //     pins.gpio12,
-    //     pins.gpio25,
-    //     pins.gpio26,
-    //     pins.gpio27,
-    //     pins.gpio23,
-    //     pins.gpio22,
-    //     pins.gpio21,
-    //     pins.gpio19,
-    //     pins.gpio18,
-    //     pins.gpio17,
-    //     pins.gpio5,
-    //     &sys_loop,
-    // );
+    let (_lan_power, _eth) = start_eth(
+        Some(ipv4_client_settings_home),
+        p.mac,
+        pins.gpio12,
+        pins.gpio25,
+        pins.gpio26,
+        pins.gpio27,
+        pins.gpio23,
+        pins.gpio22,
+        pins.gpio21,
+        pins.gpio19,
+        pins.gpio18,
+        pins.gpio17,
+        pins.gpio5,
+        &sys_loop,
+    );
 
     let mut app = ServiceApplication::new(0x02);
 
@@ -68,36 +55,26 @@ fn main() -> Result<()> {
 
     thread::sleep(Duration::from_secs(1));
 
+    app.offer_event(0x01); // Button pressed event
+
     app.start(false)?;
 
-    app.subscribe(
-        0x01,
-        0x02,
-        Arc::new(|data| {
-            println!("Received event data: {:?}", data);
-        }),
-    );
-
-    app.call_method(
-            0x01,
-            0x01,
-            vec![0xba, 0xbe, 0xef],
-            Arc::new(|data| {
-                match data {
-                    Ok(data) => {
-                        log::info!("Received data: {:?}", data);
-                    }
-                    Err(err) => {
-                        log::error!("Error: {:?}", err);
-                    }
-                }
-
-                Ok(vec![])
-            }),
-        );
+    // The button is on gpio15 and we want to notify if the button is pressed
+    let gpio15 = pins.gpio15;
+    let button_pin = Arc::new(Mutex::new(PinDriver::input(gpio15).unwrap()));
+    let button_pin_clone = Arc::clone(&button_pin);
 
     loop {
-        thread::sleep(Duration::from_secs(1));
-        println!("Calling method...");
+        let mut button_pin = button_pin_clone.lock().unwrap();
+        if button_pin.is_high() {
+            println!("Button pressed!");
+            app.notify(0x01, vec![0x01]); // Notify that the button is pressed
+        } else {
+            println!("Button released!");
+            app.notify(0x01, vec![0x00]); // Notify that the button is released
+        }
+        thread::sleep(Duration::from_millis(100)); // Polling interval
     }
+
+
 }

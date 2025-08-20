@@ -1,20 +1,14 @@
-use std::{env::set_var, net::Ipv4Addr};
-use std::sync::Arc;
+use std::net::Ipv4Addr;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
 use embedded_poc::eth::start_eth;
+use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
-use esp_idf_sys::esp;
-use protocol::{
-    application::{
-        _impl_sync::ServiceApplication, config::ServiceApplicationConfig,
-        message::ApplicationResponseErrorMessage,
-    },
-    sd::config::ServiceDiscoveryConfig,
-};
+use protocol::application::_impl_sync::ServiceApplication;
 
 fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -58,29 +52,29 @@ fn main() -> Result<()> {
 
     app.init()?;
 
-    app.offer_method(
-        0x01,
-        Arc::new(|payload| {
-            println!("Received data: {:?}", payload);
-            if payload.is_empty() {
-                log::error!("Payload is empty");
-                return Err(ApplicationResponseErrorMessage {
-                    error_code: 0x01,
-                    error_message: "Payload is empty".to_string(),
-                });
-            }
-
-            Ok(vec![])
-        }),
-    );
-
-    app.offer_event(0x02);
+    // Remove mutable led_pin from here, move pin access inside closure
+    let gpio14 = pins.gpio14;
+    let led_pin = Arc::new(Mutex::new(PinDriver::output(gpio14).unwrap()));
+    let led_pin_clone = led_pin.clone();
 
     app.start(false)?;
 
+    app.subscribe(
+        0x02,
+        0x01,
+        Arc::new(move |payload| {
+            let mut led_pin = led_pin_clone.lock().unwrap();
+            if payload[0] == 0x01 {
+                println!("Turning LED on");
+                led_pin.set_high().unwrap();
+            } else {
+                println!("Turning LED off");
+                led_pin.set_low().unwrap();
+            }
+        }),
+    );
+
     loop {
-        // Use smaller allocations for ESP32
-        app.notify(0x02, vec![0xba, 0xbe, 0xef]);
         thread::sleep(Duration::from_millis(500)); // Reduce frequency to prevent memory pressure
     }
 }

@@ -1,8 +1,10 @@
-pub mod packets;
+mod _impl_sync;
 pub mod config;
+mod constants;
 pub mod error;
 pub mod interface;
-mod _impl_sync;
+pub mod packets;
+mod registry;
 pub use self::_impl_sync::*;
-pub use self::error::{ServiceDiscoveryError, Result};
+pub use self::error::{Result, ServiceDiscoveryError};
 pub use self::interface::ServiceDiscoveryInterface;

@@ -1,5 +1,5 @@
-use std::fmt;
 use std::error::Error as StdError;
+use std::fmt;
 
 /// Application-specific error types
 #[derive(Debug)]
@@ -7,7 +7,10 @@ pub enum ServiceApplicationError {
     /// Service discovery is not initialized
     ServiceDiscoveryNotInitialized,
     /// Failed to connect to a service
-    ConnectionFailed { service_id: u16, source: anyhow::Error },
+    ConnectionFailed {
+        service_id: u16,
+        source: anyhow::Error,
+    },
     /// Service not found
     ServiceNotFound(u16),
     /// Network operation failed

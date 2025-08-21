@@ -1,6 +1,9 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use std::{io::{Read, Write}, sync::Arc};
 use rand::Rng;
+use std::{
+    io::{Read, Write},
+    sync::Arc,
+};
 
 pub const MAX_PACKET_SIZE: usize = 1024;
 
@@ -11,8 +14,13 @@ pub type MethodInvokeCallback =
     Arc<dyn Fn(Vec<u8>) -> Result<Vec<u8>, ApplicationResponseErrorMessage> + Send + Sync>;
 
 /// Callback type for handling method invocations.
-pub type MethodResponseCallback =
-    Arc<dyn Fn(Result<Vec<u8>, ApplicationResponseErrorMessage>) -> Result<Vec<u8>, ApplicationResponseErrorMessage> + Send + Sync>;
+pub type MethodResponseCallback = Arc<
+    dyn Fn(
+            Result<Vec<u8>, ApplicationResponseErrorMessage>,
+        ) -> Result<Vec<u8>, ApplicationResponseErrorMessage>
+        + Send
+        + Sync,
+>;
 
 /// Callback type for handling events.
 pub type OnEventInvokeCallback = Arc<dyn Fn(Vec<u8>) + Send + Sync>;
@@ -93,7 +101,6 @@ impl ApplicationResponseErrorMessage {
             error_message,
         })
     }
-
 }
 
 /// Represents a message in the protocol
@@ -148,10 +155,10 @@ impl ApplicationMessage {
         writer.write_u8(self.message_type as u8)?;
         writer.write_u8(self.return_code as u8)?;
         writer.write_u32::<BigEndian>(self.payload.len() as u32)?;
-        
+
         // Write payload
         writer.write_all(&self.payload)?;
-        
+
         Ok(())
     }
 
@@ -171,10 +178,10 @@ impl ApplicationMessage {
         let message_type = reader.read_u8()?;
         let return_code = reader.read_u8()?;
         let payload_length = reader.read_u32::<BigEndian>()?;
-        
+
         let mut payload = vec![0u8; payload_length as usize];
         reader.read_exact(&mut payload)?;
-        
+
         Ok(ApplicationMessage {
             service_id,
             method_id,
@@ -197,7 +204,6 @@ impl ApplicationMessage {
         rng.random_range(0..=u16::MAX)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -222,16 +228,34 @@ mod tests {
 
     #[test]
     fn test_application_message_types() {
-        assert_eq!(ApplicationMessageType::from(0x00), ApplicationMessageType::Request);
-        assert_eq!(ApplicationMessageType::from(0x02), ApplicationMessageType::Notification);
-        assert_eq!(ApplicationMessageType::from(0x03), ApplicationMessageType::Unsubscribe);
-        assert_eq!(ApplicationMessageType::from(0x04), ApplicationMessageType::Response);
+        assert_eq!(
+            ApplicationMessageType::from(0x00),
+            ApplicationMessageType::Request
+        );
+        assert_eq!(
+            ApplicationMessageType::from(0x02),
+            ApplicationMessageType::Notification
+        );
+        assert_eq!(
+            ApplicationMessageType::from(0x03),
+            ApplicationMessageType::Unsubscribe
+        );
+        assert_eq!(
+            ApplicationMessageType::from(0x04),
+            ApplicationMessageType::Response
+        );
     }
 
     #[test]
     fn test_return_codes() {
-        assert_eq!(ApplicationMessageReturnCode::from(0x00), ApplicationMessageReturnCode::Ok);
-        assert_eq!(ApplicationMessageReturnCode::from(0x01), ApplicationMessageReturnCode::Error);
+        assert_eq!(
+            ApplicationMessageReturnCode::from(0x00),
+            ApplicationMessageReturnCode::Ok
+        );
+        assert_eq!(
+            ApplicationMessageReturnCode::from(0x01),
+            ApplicationMessageReturnCode::Error
+        );
     }
 
     #[test]

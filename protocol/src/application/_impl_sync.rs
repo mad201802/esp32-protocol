@@ -10,9 +10,9 @@ use std::{
 };
 
 use anyhow::Result;
+use crossbeam::channel::{self, Receiver, TryRecvError};
 use log::{debug, error, info, trace};
 use parking_lot::Mutex;
-use crossbeam::channel::{self, Receiver, TryRecvError};
 
 // Error codes for consistent error handling
 const ERROR_CODE_EVENT_NOT_OFFERED: u8 = 0x02;
@@ -20,18 +20,18 @@ const ERROR_CODE_METHOD_NOT_FOUND: u8 = 0x03;
 const ERROR_CODE_TIMEOUT: u8 = 0x04;
 
 use crate::{
-    application::message::ApplicationResponseErrorMessage, 
+    application::message::ApplicationResponseErrorMessage,
     sd::{ServiceDiscovery, ServiceDiscoveryInterface},
     utils::retry_with_delay_option_sync,
 };
 
 use super::{
+    TcpConnectionPool,
     config::ServiceApplicationConfig,
     message::{
         ApplicationMessage, ApplicationMessageReturnCode, ApplicationMessageType,
         MethodInvokeCallback, MethodResponseCallback, OnEventInvokeCallback, RawMessageData,
     },
-    TcpConnectionPool,
 };
 
 // Structure to track request timeouts
@@ -47,7 +47,7 @@ pub struct ServiceApplication {
 
     // TCP connection pool for handling all network communication
     tcp_pool: Option<TcpConnectionPool>,
-    
+
     // Key: Method ID, Value: Callback
     offered_methods: HashMap<u16, MethodInvokeCallback>,
 
@@ -70,7 +70,7 @@ impl Clone for ServiceApplication {
             service_id: self.service_id,
             config: self.config.clone(),
             service_discovery: None, // Don't clone ServiceDiscovery as it contains non-cloneable types
-            tcp_pool: None, // Don't clone TCP pool to avoid conflicts
+            tcp_pool: None,          // Don't clone TCP pool to avoid conflicts
             offered_methods: self.offered_methods.clone(), // Clone methods for handlers to access them
             offered_events: Arc::clone(&self.offered_events),
             subscribed_events: Arc::clone(&self.subscribed_events),
@@ -84,7 +84,7 @@ impl Clone for ServiceApplication {
 
 impl ServiceApplication {
     /// Creates a new ServiceApplication with default configuration
-    /// 
+    ///
     /// # Arguments
     /// * `service_id` - Unique identifier for this service
     pub fn new(service_id: u16) -> Self {
@@ -92,7 +92,7 @@ impl ServiceApplication {
     }
 
     /// Creates a new ServiceApplication with custom configuration
-    /// 
+    ///
     /// # Arguments
     /// * `service_id` - Unique identifier for this service
     /// * `config` - Service configuration parameters
@@ -130,10 +130,13 @@ impl ServiceApplication {
     }
 
     /// Initialize the application with a custom service discovery implementation
-    /// 
+    ///
     /// # Arguments
     /// * `service_discovery` - A custom service discovery implementation
-    pub fn init_with_discovery(&mut self, mut service_discovery: Box<dyn ServiceDiscoveryInterface>) -> Result<()> {
+    pub fn init_with_discovery(
+        &mut self,
+        mut service_discovery: Box<dyn ServiceDiscoveryInterface>,
+    ) -> Result<()> {
         service_discovery.init()?;
         self.service_discovery = Some(service_discovery);
         Ok(())
@@ -152,14 +155,12 @@ impl ServiceApplication {
     /// # Arguments
     /// * `event_id` - ID of the event to offer
     pub fn offer_event(&mut self, event_id: u16) {
-        self.offered_events
-            .lock()
-            .insert(event_id, HashSet::new());
+        self.offered_events.lock().insert(event_id, HashSet::new());
         trace!("Event {} offered", event_id);
     }
 
     /// Notifies all subscribing clients of an event
-    /// 
+    ///
     /// # Arguments
     /// * `event_id` - ID of the event to notify
     /// * `payload` - Event data to send to subscribers
@@ -202,11 +203,8 @@ impl ServiceApplication {
         trace!("Finding service with ID: {}", service_id);
 
         let service_discovery = self.service_discovery.as_ref().unwrap();
-        let ip_addr = retry_with_delay_option_sync(
-            || service_discovery.find_service(service_id),
-            4,
-            500,
-        );
+        let ip_addr =
+            retry_with_delay_option_sync(|| service_discovery.find_service(service_id), 4, 500);
 
         if ip_addr.is_none() {
             error!("Could not find service with ID: {}", service_id);
@@ -241,7 +239,7 @@ impl ServiceApplication {
     }
 
     /// Calls a method on a remote service
-    /// 
+    ///
     /// # Arguments
     /// * `service_id` - ID of the target service
     /// * `method_id` - ID of the method to call
@@ -274,17 +272,14 @@ impl ServiceApplication {
         );
 
         let request_id = request_packet.request_id;
-        
+
         if let Some(tcp_pool) = &self.tcp_pool {
             let sender = tcp_pool.get_response_sender();
             match sender.send((request_packet, ip_addr)) {
                 Ok(_) => {
                     let mut open_requests = self.open_requests.lock();
                     let deadline = Instant::now() + self.config.method_call_timeout;
-                    let request_timeout = RequestTimeout {
-                        callback,
-                        deadline,
-                    };
+                    let request_timeout = RequestTimeout { callback, deadline };
                     open_requests.insert(request_id, request_timeout);
                     debug!("Sent method call request with ID: {}", request_id);
                 }
@@ -298,21 +293,16 @@ impl ServiceApplication {
     }
 
     /// Subscribes to an event from a remote service
-    /// 
+    ///
     /// This method will attempt to subscribe to an event with automatic retries.
     /// The subscription process includes sending a subscription request and waiting
     /// for confirmation from the remote service.
-    /// 
+    ///
     /// # Arguments
     /// * `service_id` - ID of the service offering the event
     /// * `event_id` - ID of the event to subscribe to
     /// * `callback` - Function to handle event notifications
-    pub fn subscribe(
-        &mut self,
-        service_id: u16,
-        event_id: u16,
-        callback: OnEventInvokeCallback,
-    ) {
+    pub fn subscribe(&mut self, service_id: u16, event_id: u16, callback: OnEventInvokeCallback) {
         debug!("Subscribing to event {}", event_id);
 
         let ip_addr = match self.service_to_ip(service_id) {
@@ -322,7 +312,7 @@ impl ServiceApplication {
                 return;
             }
         };
-        
+
         let subscription_successful = self.attempt_subscription(event_id, ip_addr);
 
         if subscription_successful {
@@ -335,15 +325,18 @@ impl ServiceApplication {
     }
 
     /// Unsubscribes from an event on a remote service
-    /// 
+    ///
     /// This method sends an unsubscribe request to the remote service and removes
     /// the event callback from the local subscribed events list.
-    /// 
+    ///
     /// # Arguments
     /// * `service_id` - ID of the service offering the event
     /// * `event_id` - ID of the event to unsubscribe from
     pub fn unsubscribe(&mut self, service_id: u16, event_id: u16) {
-        debug!("Unsubscribing from event {} on service {}", event_id, service_id);
+        debug!(
+            "Unsubscribing from event {} on service {}",
+            event_id, service_id
+        );
 
         // Remove the event callback from local subscriptions first
         {
@@ -359,7 +352,10 @@ impl ServiceApplication {
         let ip_addr = match self.service_to_ip(service_id) {
             Some(addr) => addr,
             None => {
-                error!("Could not find service with ID: {} for unsubscribe", service_id);
+                error!(
+                    "Could not find service with ID: {} for unsubscribe",
+                    service_id
+                );
                 return;
             }
         };
@@ -378,7 +374,10 @@ impl ServiceApplication {
             let sender = tcp_pool.get_response_sender();
             match sender.send((unsubscribe_packet, ip_addr)) {
                 Ok(_) => {
-                    debug!("Sent unsubscribe request for event {} to service {}", event_id, service_id);
+                    debug!(
+                        "Sent unsubscribe request for event {} to service {}",
+                        event_id, service_id
+                    );
                 }
                 Err(err) => {
                     error!("Failed to send unsubscribe packet: {:?}", err);
@@ -390,11 +389,8 @@ impl ServiceApplication {
     }
 
     fn attempt_subscription(&self, event_id: u16, ip_addr: IpAddr) -> bool {
-        retry_with_delay_option_sync(
-            || self.send_subscription_request(event_id, ip_addr),
-            4,
-            500,
-        ).is_some()
+        retry_with_delay_option_sync(|| self.send_subscription_request(event_id, ip_addr), 4, 500)
+            .is_some()
     }
 
     fn send_subscription_request(&self, event_id: u16, ip_addr: IpAddr) -> Option<()> {
@@ -408,7 +404,7 @@ impl ServiceApplication {
         );
 
         let request_id = subscribe_packet.request_id;
-        
+
         // Send the subscription request
         if let Some(tcp_pool) = &self.tcp_pool {
             let sender = tcp_pool.get_response_sender();
@@ -421,14 +417,17 @@ impl ServiceApplication {
             return None;
         }
 
-        debug!("Sent subscription request for event {} with request_id {}", event_id, request_id);
-        
+        debug!(
+            "Sent subscription request for event {} with request_id {}",
+            event_id, request_id
+        );
+
         self.wait_for_subscription_response(request_id, event_id)
     }
 
     fn wait_for_subscription_response(&self, request_id: u16, event_id: u16) -> Option<()> {
         let (response_tx, response_rx) = channel::bounded(1);
-        
+
         // Store the response sender in open_requests
         {
             let mut open_requests = self.open_requests.lock();
@@ -442,11 +441,11 @@ impl ServiceApplication {
             };
             open_requests.insert(request_id, request_timeout);
         }
-        
+
         // Wait for response with timeout
         let timeout_duration = self.config.subscription_timeout;
         let start_time = Instant::now();
-        
+
         loop {
             if start_time.elapsed() > timeout_duration {
                 debug!("Subscription timeout for event {}, will retry", event_id);
@@ -455,7 +454,7 @@ impl ServiceApplication {
                 open_requests.remove(&request_id);
                 return None;
             }
-            
+
             match response_rx.try_recv() {
                 Ok(Ok(_)) => {
                     debug!("Subscription confirmed for event {}", event_id);
@@ -478,9 +477,9 @@ impl ServiceApplication {
     }
 
     fn handle_message_data_with_rx_and_sender(
-        &self, 
+        &self,
         message_process_rx: Receiver<RawMessageData>,
-        response_sender: crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>
+        response_sender: crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>,
     ) -> Result<()> {
         while self.server_running.load(Ordering::SeqCst) {
             match message_process_rx.recv_timeout(Duration::from_millis(100)) {
@@ -499,12 +498,23 @@ impl ServiceApplication {
         Ok(())
     }
 
-    fn process_message_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
+    fn process_message_with_sender(
+        &self,
+        packet: ApplicationMessage,
+        addr: IpAddr,
+        response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>,
+    ) {
         match packet.message_type {
-            ApplicationMessageType::Request => self.handle_request_with_sender(packet, addr, response_sender),
+            ApplicationMessageType::Request => {
+                self.handle_request_with_sender(packet, addr, response_sender)
+            }
             ApplicationMessageType::Response => self.handle_response(packet),
-            ApplicationMessageType::Notification => self.handle_notification_with_sender(packet, addr, response_sender),
-            ApplicationMessageType::Subscribe => self.handle_subscription_with_sender(packet, addr, response_sender),
+            ApplicationMessageType::Notification => {
+                self.handle_notification_with_sender(packet, addr, response_sender)
+            }
+            ApplicationMessageType::Subscribe => {
+                self.handle_subscription_with_sender(packet, addr, response_sender)
+            }
             ApplicationMessageType::Unsubscribe => self.handle_unsubscription(packet, addr),
             ApplicationMessageType::INVALID => {
                 error!("Unexpected message type: {:?}", packet.message_type);
@@ -512,19 +522,22 @@ impl ServiceApplication {
         }
     }
 
-    fn handle_request_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
+    fn handle_request_with_sender(
+        &self,
+        packet: ApplicationMessage,
+        addr: IpAddr,
+        response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>,
+    ) {
         debug!("Received request from {:?}", addr);
 
         let response_packet = if let Some(callback) = self.offered_methods.get(&packet.method_id) {
             match callback(packet.payload) {
-                Ok(response_data) => {
-                    self.create_response_packet(
-                        packet.service_id,
-                        packet.method_id,
-                        packet.request_id,
-                        response_data,
-                    )
-                }
+                Ok(response_data) => self.create_response_packet(
+                    packet.service_id,
+                    packet.method_id,
+                    packet.request_id,
+                    response_data,
+                ),
                 Err(err) => {
                     error!("Error processing request: {:?}", err);
                     ApplicationMessage::new(
@@ -559,16 +572,22 @@ impl ServiceApplication {
         if let Some(request_timeout) = open_requests.remove(&packet.request_id) {
             let request_callback = request_timeout.callback;
             if packet.return_code == ApplicationMessageReturnCode::Ok {
-                let _result: std::result::Result<Vec<u8>, ApplicationResponseErrorMessage> = request_callback(Ok(packet.payload));
+                let _result: std::result::Result<Vec<u8>, ApplicationResponseErrorMessage> =
+                    request_callback(Ok(packet.payload));
             } else {
-                let error_message = ApplicationResponseErrorMessage::from_bytes(&packet.payload)
-                    .unwrap();
+                let error_message =
+                    ApplicationResponseErrorMessage::from_bytes(&packet.payload).unwrap();
                 let _result = request_callback(Err(error_message));
             }
         }
     }
 
-    fn handle_notification_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
+    fn handle_notification_with_sender(
+        &self,
+        packet: ApplicationMessage,
+        addr: IpAddr,
+        response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>,
+    ) {
         trace!("Received Notification Message: {:?}", packet);
         let subscribed_events = self.subscribed_events.lock();
         if let Some(callback) = subscribed_events.get(&packet.method_id) {
@@ -576,8 +595,11 @@ impl ServiceApplication {
         } else {
             // Client received notification for an event it's not subscribed to
             // Send unsubscribe message to the sender
-            debug!("Received notification for event {} that we're not subscribed to, sending unsubscribe to {:?}", packet.method_id, addr);
-            
+            debug!(
+                "Received notification for event {} that we're not subscribed to, sending unsubscribe to {:?}",
+                packet.method_id, addr
+            );
+
             let unsubscribe_packet = ApplicationMessage::new(
                 self.service_id,
                 packet.method_id,
@@ -588,33 +610,47 @@ impl ServiceApplication {
             );
 
             if let Err(e) = response_sender.send((unsubscribe_packet, addr)) {
-                error!("Failed to send unsubscribe message for unwanted notification: {}", e);
+                error!(
+                    "Failed to send unsubscribe message for unwanted notification: {}",
+                    e
+                );
             } else {
-                debug!("Sent unsubscribe message for event {} to {:?}", packet.method_id, addr);
+                debug!(
+                    "Sent unsubscribe message for event {} to {:?}",
+                    packet.method_id, addr
+                );
             }
         }
     }
 
-    fn handle_subscription_with_sender(&self, packet: ApplicationMessage, addr: IpAddr, response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>) {
+    fn handle_subscription_with_sender(
+        &self,
+        packet: ApplicationMessage,
+        addr: IpAddr,
+        response_sender: &crossbeam::channel::Sender<(ApplicationMessage, IpAddr)>,
+    ) {
         let mut offered_events = self.offered_events.lock();
         if let Some(offered_events_clients) = offered_events.get_mut(&packet.method_id) {
             debug!("New event subscription: {:?}", packet.method_id);
 
             offered_events_clients.insert(addr);
-            
+
             let response_packet = self.create_response_packet(
                 packet.service_id,
                 packet.method_id,
                 packet.request_id,
                 vec![],
             );
-            
+
             if let Err(e) = response_sender.send((response_packet, addr)) {
                 error!("Failed to send subscription response: {}", e);
             }
         } else {
-            error!("Event {} not offered, rejecting subscription from {:?}", packet.method_id, addr);
-            
+            error!(
+                "Event {} not offered, rejecting subscription from {:?}",
+                packet.method_id, addr
+            );
+
             let response_packet = self.create_error_response_packet(
                 packet.service_id,
                 packet.method_id,
@@ -622,7 +658,7 @@ impl ServiceApplication {
                 ERROR_CODE_EVENT_NOT_OFFERED,
                 format!("Event {} not offered", packet.method_id),
             );
-            
+
             if let Err(e) = response_sender.send((response_packet, addr)) {
                 error!("Failed to send error response: {}", e);
             }
@@ -656,20 +692,22 @@ impl ServiceApplication {
             self.config.max_sockets,
             self.config.max_clients,
         );
-        
+
         // Get the message receiver from the TCP pool for our message handler
         let message_process_rx = tcp_pool.take_message_receiver().unwrap();
-        
+
         // Get the response sender for the message handler
         let response_sender = tcp_pool.get_response_sender();
-        
+
         tcp_pool.start(false)?; // Start non-blocking
         self.tcp_pool = Some(tcp_pool);
 
         // Start message handling thread
         let server_for_handler = Arc::new(self.clone());
         let message_handler_thread = thread::spawn(move || {
-            if let Err(e) = server_for_handler.handle_message_data_with_rx_and_sender(message_process_rx, response_sender) {
+            if let Err(e) = server_for_handler
+                .handle_message_data_with_rx_and_sender(message_process_rx, response_sender)
+            {
                 error!("Message handler error: {}", e);
             }
         });
@@ -700,48 +738,51 @@ impl ServiceApplication {
 
     /// Gracefully shutdown the service application
     pub fn shutdown(&mut self) -> Result<()> {
-        info!("Shutting down service application with ID: {}", self.service_id);
-        
+        info!(
+            "Shutting down service application with ID: {}",
+            self.service_id
+        );
+
         // Signal threads to stop
         self.server_running.store(false, Ordering::SeqCst);
-        
+
         // Stop service discovery first
         if let Some(mut service_discovery) = self.service_discovery.take() {
             service_discovery.stop();
         }
-        
+
         // Stop TCP connection pool
         if let Some(mut tcp_pool) = self.tcp_pool.take() {
             tcp_pool.stop()?;
         }
-        
+
         // Join threads
         if let Some(message_handler_thread) = self.message_handler_thread.take() {
             if let Err(e) = message_handler_thread.join() {
                 error!("Message handler thread panicked: {:?}", e);
             }
         }
-        
+
         if let Some(timeout_handler_thread) = self.timeout_handler_thread.take() {
             if let Err(e) = timeout_handler_thread.join() {
                 error!("Timeout handler thread panicked: {:?}", e);
             }
         }
-        
+
         // Clear all events and requests
         {
             let mut offered_events = self.offered_events.lock();
             offered_events.clear();
-            
+
             let mut subscribed_events = self.subscribed_events.lock();
             subscribed_events.clear();
-            
+
             let mut open_requests = self.open_requests.lock();
             open_requests.clear();
         }
-        
+
         self.offered_methods.clear();
-        
+
         info!("Service application shutdown complete");
         Ok(())
     }
@@ -751,25 +792,25 @@ impl ServiceApplication {
         while self.server_running.load(Ordering::SeqCst) {
             let now = Instant::now();
             let mut timed_out_requests = Vec::new();
-            
+
             // Check for timed out requests
             {
                 let mut open_requests = self.open_requests.lock();
                 let mut to_remove = Vec::new();
-                
+
                 for (&request_id, request_timeout) in open_requests.iter() {
                     if now > request_timeout.deadline {
                         timed_out_requests.push((request_id, request_timeout.callback.clone()));
                         to_remove.push(request_id);
                     }
                 }
-                
+
                 // Remove timed out requests
                 for request_id in to_remove {
                     open_requests.remove(&request_id);
                 }
             }
-            
+
             // Process timed out requests
             for (request_id, callback) in timed_out_requests {
                 debug!("Request {} timed out", request_id);
@@ -779,7 +820,7 @@ impl ServiceApplication {
                 );
                 let _result = callback(Err(timeout_error));
             }
-            
+
             thread::sleep(self.config.request_timeout_check_interval);
         }
     }

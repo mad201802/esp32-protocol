@@ -1,10 +1,10 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServiceDiscoveryMessage {
     OfferService(u16),
-    StopOfferService(u16)
+    StopOfferService(u16),
 }
 
-impl  ServiceDiscoveryMessage {
+impl ServiceDiscoveryMessage {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
         if bytes.len() < 3 {
             return Err(());

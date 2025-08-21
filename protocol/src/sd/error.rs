@@ -46,7 +46,11 @@ impl fmt::Display for ServiceDiscoveryError {
                 write!(f, "Service discovery is not running")
             }
             ServiceDiscoveryError::ServiceIdConflict(service_id) => {
-                write!(f, "Service ID {} is already in use on the network", service_id)
+                write!(
+                    f,
+                    "Service ID {} is already in use on the network",
+                    service_id
+                )
             }
         }
     }
@@ -55,9 +59,8 @@ impl fmt::Display for ServiceDiscoveryError {
 impl std::error::Error for ServiceDiscoveryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            ServiceDiscoveryError::BindFailed(e) | ServiceDiscoveryError::MulticastJoinFailed(e) => {
-                Some(e)
-            }
+            ServiceDiscoveryError::BindFailed(e)
+            | ServiceDiscoveryError::MulticastJoinFailed(e) => Some(e),
             _ => None,
         }
     }

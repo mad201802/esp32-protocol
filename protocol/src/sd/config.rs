@@ -20,23 +20,6 @@ impl Default for ServiceDiscoveryConfig {
             bind_addr: Ipv4Addr::new(0, 0, 0, 0),
             multicast_addr: Ipv4Addr::new(239, 255, 0, 1),
             port: 30490,
-            // Optimized for embedded devices - less frequent broadcasts
-            broadcast_interval: Duration::from_secs(2),
-            socket_timeout: Duration::from_secs(5),
-            // Shorter TTL for faster cleanup on resource-constrained devices
-            service_ttl: Duration::from_secs(6),
-            collision_detection: true, // Enable collision detection by default
-        }
-    }
-}
-
-impl ServiceDiscoveryConfig {
-    /// Configuration optimized for embedded devices with limited resources
-    pub fn embedded_optimized() -> Self {
-        Self {
-            bind_addr: Ipv4Addr::new(0, 0, 0, 0),
-            multicast_addr: Ipv4Addr::new(239, 255, 0, 1),
-            port: 30490,
             // More conservative broadcast interval to save bandwidth and power
             broadcast_interval: Duration::from_secs(2),
             socket_timeout: Duration::from_secs(3),

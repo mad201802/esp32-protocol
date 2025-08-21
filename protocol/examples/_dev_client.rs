@@ -1,4 +1,8 @@
-use std::{sync::Arc, thread::{self}, time::Duration};
+use std::{
+    sync::Arc,
+    thread::{self},
+    time::Duration,
+};
 
 use anyhow::Result;
 use protocol::application::_impl_sync::ServiceApplication;
@@ -31,9 +35,13 @@ fn main() -> Result<()> {
         }),
     );
 
-    app.subscribe(0x01, 0x02, Arc::new(|data| {
-        println!("Received event data: {:?}", data);
-    }));
+    app.subscribe(
+        0x01,
+        0x02,
+        Arc::new(|data| {
+            println!("Received event data: {:?}", data);
+        }),
+    );
 
     loop {
         thread::sleep(Duration::from_secs(1));

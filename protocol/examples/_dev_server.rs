@@ -1,7 +1,9 @@
-use std::{sync::Arc, time::Duration, thread};
+use std::{sync::Arc, thread, time::Duration};
 
 use anyhow::Result;
-use protocol::application::{_impl_sync::ServiceApplication, message::ApplicationResponseErrorMessage};
+use protocol::application::{
+    _impl_sync::ServiceApplication, message::ApplicationResponseErrorMessage,
+};
 
 fn main() -> Result<()> {
     env_logger::init();

@@ -11,123 +11,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::sd::{
+    constants::{
+        CLEANUP_INTERVAL_MS, CONFLICT_CHECK_TIMEOUT_MS, POLL_INTERVAL_MS, SD_RECV_BUFFER_SIZE,
+    },
+    registry::ServiceRegistry,
+};
+
 use super::{
     ServiceDiscoveryInterface, config::ServiceDiscoveryConfig, error::ServiceDiscoveryError,
     packets::ServiceDiscoveryMessage,
 };
-
-// Service discovery packets are small (3 bytes), but allow some buffer for network overhead
-const SD_RECV_BUFFER_SIZE: usize = 64;
-// Maximum number of services to track (embedded-friendly fixed size)
-const MAX_TRACKED_SERVICES: usize = 32;
-// Embedded-specific optimizations
-const POLL_INTERVAL_MS: u64 = 10;
-const CLEANUP_INTERVAL_MS: u64 = 1000;
-// Reduced conflict check timeout for faster startup on embedded devices
-const CONFLICT_CHECK_TIMEOUT_MS: u64 = 1000;
-
-#[derive(Debug, Clone, Copy)]
-pub struct ServiceEntry {
-    service_id: u16,
-    ip: IpAddr,
-    last_seen: Instant,
-    active: bool,
-}
-
-impl Default for ServiceEntry {
-    fn default() -> Self {
-        Self {
-            service_id: 0,
-            ip: IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
-            last_seen: Instant::now(),
-            active: false,
-        }
-    }
-}
-
-/// Fixed-size service registry optimized for embedded devices
-#[derive(Debug)]
-struct ServiceRegistry {
-    entries: [ServiceEntry; MAX_TRACKED_SERVICES],
-    next_slot: usize,
-}
-
-impl ServiceRegistry {
-    fn new() -> Self {
-        Self {
-            entries: [ServiceEntry::default(); MAX_TRACKED_SERVICES],
-            next_slot: 0,
-        }
-    }
-
-    fn insert(&mut self, service_id: u16, ip: IpAddr) {
-        // First, try to find existing entry for this service
-        for entry in self.entries.iter_mut() {
-            if entry.active && entry.service_id == service_id {
-                entry.ip = ip;
-                entry.last_seen = Instant::now();
-                return;
-            }
-        }
-
-        // If not found, try to find an inactive slot
-        for entry in self.entries.iter_mut() {
-            if !entry.active {
-                *entry = ServiceEntry {
-                    service_id,
-                    ip,
-                    last_seen: Instant::now(),
-                    active: true,
-                };
-                return;
-            }
-        }
-
-        // If no inactive slot, use round-robin replacement
-        self.entries[self.next_slot] = ServiceEntry {
-            service_id,
-            ip,
-            last_seen: Instant::now(),
-            active: true,
-        };
-        self.next_slot = (self.next_slot + 1) % MAX_TRACKED_SERVICES;
-    }
-
-    fn remove(&mut self, service_id: u16) {
-        for entry in self.entries.iter_mut() {
-            if entry.active && entry.service_id == service_id {
-                entry.active = false;
-                break;
-            }
-        }
-    }
-
-    fn find(&self, service_id: u16) -> Option<IpAddr> {
-        for entry in self.entries.iter() {
-            if entry.active && entry.service_id == service_id {
-                return Some(entry.ip);
-            }
-        }
-        None
-    }
-
-    fn cleanup_stale(&mut self, ttl: Duration) {
-        let now = Instant::now();
-        for entry in self.entries.iter_mut() {
-            if entry.active && now.duration_since(entry.last_seen) > ttl {
-                entry.active = false;
-            }
-        }
-    }
-
-    fn get_active_services(&self) -> Vec<(u16, IpAddr)> {
-        self.entries
-            .iter()
-            .filter(|entry| entry.active)
-            .map(|entry| (entry.service_id, entry.ip))
-            .collect()
-    }
-}
 
 pub struct ServiceDiscovery {
     service_id: u16,
@@ -146,14 +40,6 @@ impl ServiceDiscovery {
     /// * `service_id` - Unique identifier for this service instance
     pub fn new(service_id: u16) -> Self {
         Self::with_config(service_id, ServiceDiscoveryConfig::default())
-    }
-
-    /// Creates a new instance of `ServiceDiscovery` optimized for embedded devices.
-    ///
-    /// # Arguments
-    /// * `service_id` - Unique identifier for this service instance
-    pub fn new_embedded(service_id: u16) -> Self {
-        Self::with_config(service_id, ServiceDiscoveryConfig::embedded_optimized())
     }
 
     /// Creates a new instance of `ServiceDiscovery` with the provided configuration.
@@ -316,11 +202,6 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
             if let Err(conflict_err) = self.check_service_id_conflict() {
                 return Err(anyhow::anyhow!("Service ID conflict: {}", conflict_err));
             }
-        }
-
-        // Check for service ID conflicts before starting
-        if let Err(conflict_err) = self.check_service_id_conflict() {
-            return Err(anyhow::anyhow!("Service ID conflict: {}", conflict_err));
         }
 
         let socket = self.socket.clone().unwrap();

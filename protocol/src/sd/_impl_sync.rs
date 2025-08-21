@@ -235,7 +235,7 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
                                             id,
                                             src.ip()
                                         );
-                                        registry.insert(id, src.ip());
+                                        let _ = registry.insert(id, src.ip());
                                     }
                                     ServiceDiscoveryMessage::StopOfferService(id) => {
                                         trace!(

@@ -34,17 +34,17 @@ pub struct ServiceRegistry {
 impl ServiceRegistry {
     pub fn new() -> Self {
         Self {
-            entries: [ServiceEntry::default(); SD_MAX_TRACKED_SERVICES]
+            entries: [ServiceEntry::default(); SD_MAX_TRACKED_SERVICES],
         }
     }
 
-    pub fn insert(&mut self, service_id: u16, ip: IpAddr) -> Result<()>{
+    pub fn insert(&mut self, service_id: u16, ip: IpAddr) -> Result<()> {
         // First, try to find existing entry for this service
         for entry in self.entries.iter_mut() {
             if entry.active && entry.service_id == service_id {
                 entry.ip = ip;
                 entry.last_seen = Instant::now();
-                return Ok(())
+                return Ok(());
             }
         }
 
@@ -61,7 +61,9 @@ impl ServiceRegistry {
             }
         }
 
-        return Err(anyhow::anyhow!("Service registry is full, cannot insert new service"));
+        return Err(anyhow::anyhow!(
+            "Service registry is full, cannot insert new service"
+        ));
     }
 
     pub fn remove(&mut self, service_id: u16) {

@@ -2,7 +2,8 @@ pub mod _impl_sync;
 pub mod config;
 pub mod error;
 pub mod message;
-pub mod pooling;
+mod pooling;
+mod constants;
 
 pub use error::{Result, ServiceApplicationError};
-pub use pooling::TcpConnectionPool;
+pub use pooling::tcp::TcpConnectionPool;

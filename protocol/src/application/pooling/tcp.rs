@@ -14,127 +14,7 @@ use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 use log::{debug, error, info, trace};
 use parking_lot::Mutex;
 
-use super::message::{ApplicationMessage, RawMessageData};
-
-/// Simple buffer pool for reusing packet serialization buffers
-struct BufferPool {
-    buffers: Mutex<Vec<Vec<u8>>>,
-    max_buffers: usize,
-}
-
-impl BufferPool {
-    fn new(max_buffers: usize) -> Self {
-        Self {
-            buffers: Mutex::new(Vec::with_capacity(max_buffers)),
-            max_buffers,
-        }
-    }
-
-    fn get_buffer(&self) -> Vec<u8> {
-        let mut buffers = self.buffers.lock();
-        buffers
-            .pop()
-            .unwrap_or_else(|| Vec::with_capacity(MAX_PACKET_BUFFER_SIZE))
-    }
-
-    fn return_buffer(&self, mut buffer: Vec<u8>) {
-        buffer.clear();
-        // Only keep reasonable-sized buffers to prevent memory bloat
-        if buffer.capacity() <= MAX_PACKET_BUFFER_SIZE * 2 {
-            let mut buffers = self.buffers.lock();
-            if buffers.len() < self.max_buffers {
-                buffers.push(buffer);
-            }
-        }
-    }
-}
-
-/// Fixed-size client connection tracking for embedded devices
-#[derive(Clone, Copy)]
-struct ClientEntry {
-    ip: IpAddr,
-    sender_index: Option<usize>,
-    active: bool,
-}
-
-impl Default for ClientEntry {
-    fn default() -> Self {
-        Self {
-            ip: IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)),
-            sender_index: None,
-            active: false,
-        }
-    }
-}
-
-struct FixedClientRegistry {
-    entries: [ClientEntry; MAX_CLIENTS_FIXED],
-    senders: [Option<Sender<ApplicationMessage>>; MAX_CLIENTS_FIXED],
-}
-
-impl FixedClientRegistry {
-    fn new() -> Self {
-        Self {
-            entries: [ClientEntry::default(); MAX_CLIENTS_FIXED],
-            senders: std::array::from_fn(|_| None),
-        }
-    }
-
-    fn add_client(&mut self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
-        // Find existing entry or empty slot
-        for (i, entry) in self.entries.iter_mut().enumerate() {
-            if !entry.active || entry.ip == ip {
-                entry.ip = ip;
-                entry.sender_index = Some(i);
-                entry.active = true;
-                self.senders[i] = Some(sender);
-                return Ok(());
-            }
-        }
-        Err(anyhow::anyhow!("No available client slots"))
-    }
-
-    fn remove_client(&mut self, ip: IpAddr) {
-        for (i, entry) in self.entries.iter_mut().enumerate() {
-            if entry.active && entry.ip == ip {
-                entry.active = false;
-                self.senders[i] = None;
-                break;
-            }
-        }
-    }
-
-    fn get_sender(&self, ip: IpAddr) -> Option<&Sender<ApplicationMessage>> {
-        for entry in &self.entries {
-            if entry.active && entry.ip == ip {
-                if let Some(idx) = entry.sender_index {
-                    return self.senders[idx].as_ref();
-                }
-            }
-        }
-        None
-    }
-
-    fn is_connected(&self, ip: IpAddr) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| entry.active && entry.ip == ip)
-    }
-
-    fn len(&self) -> usize {
-        self.entries.iter().filter(|entry| entry.active).count()
-    }
-}
-
-// Optimized constants for embedded devices - further reduced for minimal heap usage
-const TEMP_BUFFER_SIZE: usize = 32; // Further reduced from 64 - temporary read buffer  
-const MAX_BUFFER_GROWTH: usize = 256; // Further reduced to prevent buffer growth
-const POLL_INTERVAL_MS: u64 = 5; // Reduced from 10ms for better responsiveness
-const CHANNEL_CAPACITY: usize = 8; // Further reduced from 16 for memory efficiency
-const CONNECT_TIMEOUT_MS: u64 = 100; // Reduced connection wait time
-const DISTRIBUTOR_TIMEOUT_MS: u64 = 50; // Message distributor timeout
-const MAX_PACKET_BUFFER_SIZE: usize = 512; // Fixed size for packet serialization buffer
-const MAX_CLIENTS_FIXED: usize = 8; // Fixed maximum clients for embedded use
+use crate::application::{constants::{CHANNEL_CAPACITY, CONNECT_TIMEOUT_MS, DISTRIBUTOR_TIMEOUT_MS, MAX_BUFFER_GROWTH, MAX_CLIENTS_FIXED, POLL_INTERVAL_MS, TEMP_BUFFER_SIZE}, message::{ApplicationMessage, RawMessageData}, pooling::{buffer_pool::BufferPool, client_registry::FixedClientRegistry}};
 
 /// TCP Connection Pool for managing client connections and message routing
 /// Optimized for embedded devices with minimal heap allocations
@@ -145,12 +25,14 @@ pub struct TcpConnectionPool {
     /// Buffer pool for reusing serialization buffers
     buffer_pool: Arc<BufferPool>,
 
-    /// Channel for incoming messages from clients (sent to ServiceApplication)
+    /// Channel for incoming messages from clients (received from TcpStream)
     message_process_tx: Sender<RawMessageData>,
+    /// Receiver for incoming messages from clients (used by ServiceApplication)
     message_process_rx: Option<Receiver<RawMessageData>>,
 
     /// Channel for outgoing messages to clients (received from ServiceApplication)
     client_response_tx: Sender<RawMessageData>,
+    /// Receiver for outgoing messages to clients (used by TcpStream handler)
     client_response_rx: Option<Receiver<RawMessageData>>,
 
     /// Server configuration
@@ -171,9 +53,6 @@ impl TcpConnectionPool {
         let (message_process_tx, message_process_rx) = channel::bounded(CHANNEL_CAPACITY);
         let (client_response_tx, client_response_rx) = channel::bounded(CHANNEL_CAPACITY);
 
-        // Ensure max_clients doesn't exceed our fixed array size
-        let effective_max_clients = max_clients.min(MAX_CLIENTS_FIXED);
-
         Self {
             client_registry: Arc::new(Mutex::new(FixedClientRegistry::new())),
             buffer_pool: Arc::new(BufferPool::new(4)), // Small buffer pool for embedded use
@@ -183,7 +62,7 @@ impl TcpConnectionPool {
             client_response_rx: Some(client_response_rx),
             bind_addr,
             port,
-            max_clients: effective_max_clients,
+            max_clients: max_clients.min(MAX_CLIENTS_FIXED), // Ensure max_clients doesn't exceed our fixed array size
             server_running: Arc::new(AtomicBool::new(false)),
             server_thread: None,
             message_distributor_thread: None,

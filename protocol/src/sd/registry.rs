@@ -61,9 +61,9 @@ impl ServiceRegistry {
             }
         }
 
-        return Err(anyhow::anyhow!(
+        Err(anyhow::anyhow!(
             "Service registry is full, cannot insert new service"
-        ));
+        ))
     }
 
     pub fn remove(&mut self, service_id: u16) {

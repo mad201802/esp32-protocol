@@ -757,17 +757,15 @@ impl ServiceApplication {
         }
 
         // Join threads
-        if let Some(message_handler_thread) = self.message_handler_thread.take() {
-            if let Err(e) = message_handler_thread.join() {
+        if let Some(message_handler_thread) = self.message_handler_thread.take()
+            && let Err(e) = message_handler_thread.join() {
                 error!("Message handler thread panicked: {:?}", e);
             }
-        }
 
-        if let Some(timeout_handler_thread) = self.timeout_handler_thread.take() {
-            if let Err(e) = timeout_handler_thread.join() {
+        if let Some(timeout_handler_thread) = self.timeout_handler_thread.take()
+            && let Err(e) = timeout_handler_thread.join() {
                 error!("Timeout handler thread panicked: {:?}", e);
             }
-        }
 
         // Clear all events and requests
         {

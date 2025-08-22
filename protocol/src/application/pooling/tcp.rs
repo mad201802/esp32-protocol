@@ -149,17 +149,15 @@ impl TcpConnectionPool {
         self.server_running.store(false, Ordering::SeqCst);
 
         // Join threads
-        if let Some(server_thread) = self.server_thread.take() {
-            if let Err(e) = server_thread.join() {
+        if let Some(server_thread) = self.server_thread.take()
+            && let Err(e) = server_thread.join() {
                 error!("Server thread panicked: {:?}", e);
             }
-        }
 
-        if let Some(message_distributor_thread) = self.message_distributor_thread.take() {
-            if let Err(e) = message_distributor_thread.join() {
+        if let Some(message_distributor_thread) = self.message_distributor_thread.take()
+            && let Err(e) = message_distributor_thread.join() {
                 error!("Message distributor thread panicked: {:?}", e);
             }
-        }
 
         // Clear all connections using fixed-size registry
         {

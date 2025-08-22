@@ -93,19 +93,19 @@ impl ServiceDiscovery {
         // Temporarily set socket to blocking mode with timeout for conflict check
         socket
             .set_read_timeout(Some(Duration::from_millis(50)))
-            .map_err(|e| ServiceDiscoveryError::BindFailed(e))?;
+            .map_err(ServiceDiscoveryError::BindFailed)?;
         socket
             .set_nonblocking(false)
-            .map_err(|e| ServiceDiscoveryError::BindFailed(e))?;
+            .map_err(ServiceDiscoveryError::BindFailed)?;
 
         let mut buf = [0; SD_RECV_BUFFER_SIZE];
 
         while start_time.elapsed() < conflict_check_timeout {
             match socket.recv_from(&mut buf) {
                 Ok((size, src)) => {
-                    if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size]) {
-                        if let ServiceDiscoveryMessage::OfferService(id) = packet {
-                            if id == self.service_id {
+                    if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size])
+                        && let ServiceDiscoveryMessage::OfferService(id) = packet
+                            && id == self.service_id {
                                 error!(
                                     "Service ID conflict detected: Service ID {} is already being offered by {}",
                                     id,
@@ -117,8 +117,6 @@ impl ServiceDiscovery {
                                     self.service_id,
                                 ));
                             }
-                        }
-                    }
                 }
                 Err(e) => {
                     // Timeout or would block - continue checking
@@ -134,7 +132,7 @@ impl ServiceDiscovery {
         // Restore socket to non-blocking mode
         socket
             .set_nonblocking(true)
-            .map_err(|e| ServiceDiscoveryError::BindFailed(e))?;
+            .map_err(ServiceDiscoveryError::BindFailed)?;
 
         debug!(
             "No service ID conflict detected for ID: {}",

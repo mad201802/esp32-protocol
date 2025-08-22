@@ -62,11 +62,10 @@ impl FixedClientRegistry {
 
     pub fn get_sender(&self, ip: IpAddr) -> Option<&Sender<ApplicationMessage>> {
         for entry in &self.entries {
-            if entry.active && entry.ip == ip {
-                if let Some(idx) = entry.sender_index {
+            if entry.active && entry.ip == ip
+                && let Some(idx) = entry.sender_index {
                     return self.senders[idx].as_ref();
                 }
-            }
         }
         None
     }

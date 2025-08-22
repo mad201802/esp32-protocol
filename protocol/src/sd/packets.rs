@@ -1,3 +1,5 @@
+use anyhow::Result;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServiceDiscoveryMessage {
     OfferService(u16),
@@ -5,9 +7,9 @@ pub enum ServiceDiscoveryMessage {
 }
 
 impl ServiceDiscoveryMessage {
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ()> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < 3 {
-            return Err(());
+            return Err(anyhow::anyhow!("Invalid message length"));
         }
 
         let message_type = bytes[0];
@@ -16,7 +18,7 @@ impl ServiceDiscoveryMessage {
         match message_type {
             0x01 => Ok(ServiceDiscoveryMessage::OfferService(service_id)),
             0x02 => Ok(ServiceDiscoveryMessage::StopOfferService(service_id)),
-            _ => Err(()),
+            _ => Err(anyhow::anyhow!("Unknown message type: {}", message_type)),
         }
     }
 

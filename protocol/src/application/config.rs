@@ -5,8 +5,11 @@ use crate::sd::config::ServiceDiscoveryConfig;
 
 #[derive(Clone)]
 pub struct ServiceApplicationConfig {
+    /// Address to bind the service application to
     pub bind_addr: IpAddr,
+    /// Port to bind the service application to
     pub port: u16,
+    /// Configuration for service discovery
     pub discovery_config: ServiceDiscoveryConfig,
     /// Timeout for method calls
     pub method_call_timeout: Duration,

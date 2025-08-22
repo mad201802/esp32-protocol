@@ -105,18 +105,19 @@ impl ServiceDiscovery {
                 Ok((size, src)) => {
                     if let Ok(packet) = ServiceDiscoveryMessage::from_bytes(&buf[..size])
                         && let ServiceDiscoveryMessage::OfferService(id) = packet
-                            && id == self.service_id {
-                                error!(
-                                    "Service ID conflict detected: Service ID {} is already being offered by {}",
-                                    id,
-                                    src.ip()
-                                );
-                                // Restore socket to non-blocking mode before returning error
-                                let _ = socket.set_nonblocking(true);
-                                return Err(ServiceDiscoveryError::ServiceIdConflict(
-                                    self.service_id,
-                                ));
-                            }
+                        && id == self.service_id
+                    {
+                        error!(
+                            "Service ID conflict detected: Service ID {} is already being offered by {}",
+                            id,
+                            src.ip()
+                        );
+                        // Restore socket to non-blocking mode before returning error
+                        if let Err(e) = socket.set_nonblocking(true) {
+                            error!("Failed to restore socket to non-blocking mode: {}", e);
+                        }
+                        return Err(ServiceDiscoveryError::ServiceIdConflict(self.service_id));
+                    }
                 }
                 Err(e) => {
                     // Timeout or would block - continue checking
@@ -259,8 +260,8 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
                     }
 
                     // Periodic cleanup of stale services (embedded-friendly)
-                    let now = Instant::now();
-                    if now.duration_since(last_cleanup) >= cleanup_interval {
+                    if Instant::now().duration_since(last_cleanup) >= cleanup_interval {
+                        let now = Instant::now();
                         let mut registry = services_registry.lock();
                         registry.cleanup_stale(service_ttl); // Use config TTL
                         last_cleanup = now;
@@ -365,11 +366,12 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
             } else {
                 trace!("Sender thread stopped gracefully");
             }
+            // Now take the socket to ensure cleanup
+            if let Some(socket) = self.socket.take() {
+                drop(socket);
+            }
+
+            info!("Service discovery stopped with ID: {}", self.service_id);
         }
-
-        // Now take the socket to ensure cleanup
-        self.socket.take();
-
-        info!("Service discovery stopped with ID: {}", self.service_id);
     }
 }

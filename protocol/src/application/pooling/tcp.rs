@@ -1,3 +1,16 @@
+//! # TCP Connection Pool for Embedded Systems
+//!
+//! This module provides a TCP connection pool optimized for embedded devices with
+//! minimal heap allocations and efficient resource usage.
+//!
+//! ## Key Features
+//!
+//! - **Fixed-size allocations**: Uses arrays instead of dynamic vectors
+//! - **Non-blocking I/O**: Prevents blocking operations that could freeze the system
+//! - **Adaptive polling**: Adjusts sleep intervals based on activity
+//! - **Thread-safe**: Safe to use from multiple threads
+//! - **Robust error handling**: Graceful handling of network errors
+
 use std::{
     io::{Read, Write},
     net::{IpAddr, SocketAddr, TcpListener, TcpStream},
@@ -9,7 +22,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 use log::{debug, error, info, trace};
 use parking_lot::Mutex;
@@ -23,38 +36,117 @@ use crate::application::{
     serializable::Serializable,
 };
 
-/// Generic raw message data type for any serializable message
-pub type GenericRawMessageData<T> = (T, std::net::IpAddr);
+/// Constants for improved readability
+const INACTIVE_READ_THRESHOLD: u8 = 10;
+const INACTIVE_SLEEP_MULTIPLIER: u64 = 2;
+
+/// Message with its source/destination IP address
+pub type MessageWithAddress<T> = (T, IpAddr);
+
+/// Represents the possible states of message processing
+#[derive(Debug)]
+enum ProcessingState {
+    /// A complete message was processed
+    MessageProcessed,
+    /// Message is incomplete, waiting for more data
+    IncompleteMessage,
+    /// Buffer was reset due to overflow protection
+    BufferReset,
+}
+
+/// Trait alias for cleaner type constraints
+pub trait ProtocolMessage: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static {}
+
+// Blanket implementation for all types that satisfy the constraints
+impl<T> ProtocolMessage for T where T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static {}
+
+/// Configuration for the TCP connection pool
+#[derive(Debug, Clone)]
+pub struct TcpPoolConfig {
+    pub bind_addr: IpAddr,
+    pub port: u16,
+    pub max_clients: usize,
+}
+
+impl TcpPoolConfig {
+    pub fn new(bind_addr: IpAddr, port: u16, max_clients: usize) -> Self {
+        Self {
+            bind_addr,
+            port,
+            max_clients: max_clients.min(MAX_CLIENTS_FIXED),
+        }
+    }
+}
+
+/// Manages the server thread and message distributor thread
+struct ThreadManager {
+    server_thread: Option<JoinHandle<()>>,
+    message_distributor_thread: Option<JoinHandle<()>>,
+    is_running: Arc<AtomicBool>,
+}
+
+impl ThreadManager {
+    fn new() -> Self {
+        Self {
+            server_thread: None,
+            message_distributor_thread: None,
+            is_running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn start(&mut self) {
+        self.is_running.store(true, Ordering::SeqCst);
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        info!("Stopping TCP connection pool threads");
+        
+        self.is_running.store(false, Ordering::SeqCst);
+
+        if let Some(server_thread) = self.server_thread.take() {
+            if let Err(e) = server_thread.join() {
+                error!("Server thread panicked: {:?}", e);
+            }
+        }
+
+        if let Some(message_distributor_thread) = self.message_distributor_thread.take() {
+            if let Err(e) = message_distributor_thread.join() {
+                error!("Message distributor thread panicked: {:?}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::SeqCst)
+    }
+}
 
 /// TCP Connection Pool for managing client connections and message routing
 /// Optimized for embedded devices with minimal heap allocations
-pub struct TcpConnectionPool<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> {
+pub struct TcpConnectionPool<T: ProtocolMessage> {
     /// Fixed-size client registry instead of dynamic HashMap/HashSet
     client_registry: Arc<Mutex<FixedClientRegistry<T>>>,
 
     /// Channel for incoming messages from clients (received from TcpStream)
-    message_process_tx: Sender<GenericRawMessageData<T>>,
+    message_process_tx: Sender<MessageWithAddress<T>>,
     /// Receiver for incoming messages from clients (used by ServiceApplication)
-    message_process_rx: Option<Receiver<GenericRawMessageData<T>>>,
+    message_process_rx: Option<Receiver<MessageWithAddress<T>>>,
 
     /// Channel for outgoing messages to clients (received from ServiceApplication)
-    client_response_tx: Sender<GenericRawMessageData<T>>,
+    client_response_tx: Sender<MessageWithAddress<T>>,
     /// Receiver for outgoing messages to clients (used by TcpStream handler)
-    client_response_rx: Option<Receiver<GenericRawMessageData<T>>>,
+    client_response_rx: Option<Receiver<MessageWithAddress<T>>>,
 
     /// Server configuration
-    bind_addr: IpAddr,
-    port: u16,
-    /// Maximum number of clients (now using fixed-size registry)
-    max_clients: usize,
+    config: TcpPoolConfig,
 
-    /// Server control
-    server_running: Arc<AtomicBool>,
-    server_thread: Option<JoinHandle<()>>,
-    message_distributor_thread: Option<JoinHandle<()>>,
+    /// Thread management
+    thread_manager: ThreadManager,
 }
 
-impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConnectionPool<T> {
+impl<T: ProtocolMessage> TcpConnectionPool<T> {
     /// Create a new TCP connection pool with optimized settings for embedded devices
     pub fn new(bind_addr: IpAddr, port: u16, _max_sockets: usize, max_clients: usize) -> Self {
         let (message_process_tx, message_process_rx) = channel::bounded(CHANNEL_CAPACITY);
@@ -66,28 +158,35 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
             message_process_rx: Some(message_process_rx),
             client_response_tx,
             client_response_rx: Some(client_response_rx),
-            bind_addr,
-            port,
-            max_clients: max_clients.min(MAX_CLIENTS_FIXED), // Ensure max_clients doesn't exceed our fixed array size
-            server_running: Arc::new(AtomicBool::new(false)),
-            server_thread: None,
-            message_distributor_thread: None,
+            config: TcpPoolConfig::new(bind_addr, port, max_clients),
+            thread_manager: ThreadManager::new(),
         }
     }
 
     /// Get the message processing receiver (used by ServiceApplication)
-    pub fn take_message_receiver(&mut self) -> Option<Receiver<GenericRawMessageData<T>>> {
+    pub fn take_message_receiver(&mut self) -> Option<Receiver<MessageWithAddress<T>>> {
         self.message_process_rx.take()
     }
 
     /// Get the client response sender (used by ServiceApplication)
-    pub fn get_response_sender(&self) -> Sender<GenericRawMessageData<T>> {
+    pub fn get_response_sender(&self) -> Sender<MessageWithAddress<T>> {
         self.client_response_tx.clone()
+    }
+
+    /// Check if the pool is currently running
+    pub fn is_running(&self) -> bool {
+        self.thread_manager.is_running()
+    }
+
+    /// Get the number of active connections
+    pub fn active_connection_count(&self) -> usize {
+        let client_registry = self.client_registry.lock();
+        client_registry.len()
     }
 
     /// Start the TCP server and message distributor
     pub fn start(&mut self, blocking: bool) -> Result<()> {
-        self.server_running.store(true, Ordering::SeqCst);
+        self.thread_manager.start();
 
         // Start message distributor thread
         let client_response_rx = self.client_response_rx.take().unwrap();
@@ -99,6 +198,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
         });
 
         if blocking {
+            self.thread_manager.message_distributor_thread = Some(message_distributor_thread);
             self.start_listening()
         } else {
             let pool_for_server = self.clone_for_thread();
@@ -107,8 +207,8 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                     error!("Failed to start listening: {}", e);
                 }
             });
-            self.server_thread = Some(server_thread);
-            self.message_distributor_thread = Some(message_distributor_thread);
+            self.thread_manager.server_thread = Some(server_thread);
+            self.thread_manager.message_distributor_thread = Some(message_distributor_thread);
             Ok(())
         }
     }
@@ -117,8 +217,8 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
     pub fn connect(&self, ip_addr: IpAddr) -> Result<()> {
         debug!("Connecting to service at {:?}", ip_addr);
 
-        let socket = TcpStream::connect(SocketAddr::new(ip_addr, self.port))
-            .map_err(|e| anyhow::anyhow!("Failed to connect to {}: {}", ip_addr, e))?;
+        let socket = TcpStream::connect(SocketAddr::new(ip_addr, self.config.port))
+            .map_err(|e| anyhow!("Failed to connect to {}: {}", ip_addr, e))?;
 
         let pool = self.clone_for_thread();
 
@@ -142,23 +242,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
 
     /// Stop the TCP connection pool
     pub fn stop(&mut self) -> Result<()> {
-        info!("Stopping TCP connection pool");
-
-        // Signal threads to stop
-        self.server_running.store(false, Ordering::SeqCst);
-
-        // Join threads
-        if let Some(server_thread) = self.server_thread.take()
-            && let Err(e) = server_thread.join()
-        {
-            error!("Server thread panicked: {:?}", e);
-        }
-
-        if let Some(message_distributor_thread) = self.message_distributor_thread.take()
-            && let Err(e) = message_distributor_thread.join()
-        {
-            error!("Message distributor thread panicked: {:?}", e);
-        }
+        self.thread_manager.stop()?;
 
         // Clear all connections using fixed-size registry
         {
@@ -178,33 +262,33 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
             message_process_rx: None,
             client_response_tx: self.client_response_tx.clone(),
             client_response_rx: None,
-            bind_addr: self.bind_addr,
-            port: self.port,
-            max_clients: self.max_clients,
-            server_running: Arc::clone(&self.server_running),
-            server_thread: None,
-            message_distributor_thread: None,
+            config: self.config.clone(),
+            thread_manager: ThreadManager {
+                server_thread: None,
+                message_distributor_thread: None,
+                is_running: Arc::clone(&self.thread_manager.is_running),
+            },
         }
     }
 
     /// Start listening for incoming TCP connections
     fn start_listening(&self) -> Result<()> {
-        let listener = TcpListener::bind((self.bind_addr, self.port)).map_err(|e| {
-            anyhow::anyhow!(
+        let listener = TcpListener::bind((self.config.bind_addr, self.config.port)).map_err(|e| {
+            anyhow!(
                 "Failed to bind TCP listener to {}:{}: {}",
-                self.bind_addr,
-                self.port,
+                self.config.bind_addr,
+                self.config.port,
                 e
             )
         })?;
 
         info!(
             "Listening for incoming connections on {}:{}",
-            self.bind_addr, self.port
+            self.config.bind_addr, self.config.port
         );
 
         for stream in listener.incoming() {
-            if !self.server_running.load(Ordering::SeqCst) {
+            if !self.thread_manager.is_running() {
                 break;
             }
 
@@ -249,7 +333,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
         let mut consecutive_empty_reads = 0u8;
 
         loop {
-            if !self.server_running.load(Ordering::SeqCst) {
+            if !self.thread_manager.is_running() {
                 break;
             }
 
@@ -265,7 +349,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                 Ok(bytes_read) => {
                     had_activity = true;
                     consecutive_empty_reads = 0;
-                    if let Err(e) = self.process_incoming_data_fixed(
+                    if let Err(e) = self.process_incoming_data(
                         &mut buffer,
                         &mut buffer_len,
                         &temp_buffer[..bytes_read],
@@ -293,10 +377,10 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
             }
 
             // Adaptive sleep based on activity - sleep longer when inactive to save CPU
-            let sleep_duration = if had_activity || consecutive_empty_reads < 10 {
+            let sleep_duration = if had_activity || consecutive_empty_reads < INACTIVE_READ_THRESHOLD {
                 Duration::from_millis(POLL_INTERVAL_MS)
             } else {
-                Duration::from_millis(POLL_INTERVAL_MS * 2) // Double sleep time when inactive
+                Duration::from_millis(POLL_INTERVAL_MS * INACTIVE_SLEEP_MULTIPLIER) // Double sleep time when inactive
             };
 
             thread::sleep(sleep_duration);
@@ -307,8 +391,8 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
     /// Register a new client connection
     fn register_client(&self, ip: IpAddr, sender: Sender<T>) -> Result<()> {
         let mut client_registry = self.client_registry.lock();
-        if client_registry.len() >= self.max_clients {
-            return Err(anyhow::anyhow!("Maximum client connections reached"));
+        if client_registry.len() >= self.config.max_clients {
+            return Err(anyhow!("Maximum client connections reached"));
         }
         client_registry.add_client(ip, sender)
     }
@@ -320,19 +404,42 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
     }
 
     /// Process incoming data from a client using fixed-size buffers to avoid heap allocations
-    fn process_incoming_data_fixed(
+    fn process_incoming_data(
         &self,
         buffer: &mut [u8; MAX_BUFFER_GROWTH],
         buffer_len: &mut usize,
         data: &[u8],
         ip: IpAddr,
     ) -> Result<()> {
+        let processing_result = self.try_process_data(buffer, buffer_len, data, ip)?;
+        
+        match processing_result {
+            ProcessingState::MessageProcessed => {
+                trace!("Successfully processed message from {}", ip);
+            }
+            ProcessingState::IncompleteMessage => {
+                trace!("Waiting for more data from {}", ip);
+            }
+            ProcessingState::BufferReset => {
+                debug!("Buffer reset for client {}", ip);
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Try to process incoming data and return the processing state
+    fn try_process_data(
+        &self,
+        buffer: &mut [u8; MAX_BUFFER_GROWTH],
+        buffer_len: &mut usize,
+        data: &[u8],
+        ip: IpAddr,
+    ) -> Result<ProcessingState> {
         // Check if we have space for new data
         if *buffer_len + data.len() > MAX_BUFFER_GROWTH {
             *buffer_len = 0; // Reset buffer
-            return Err(anyhow::anyhow!(
-                "Buffer overflow protection triggered, clearing"
-            ));
+            return Ok(ProcessingState::BufferReset);
         }
 
         // Copy new data into our fixed buffer
@@ -345,13 +452,13 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                 // Send the message and reset buffer
                 self.message_process_tx.send((packet, ip))?;
                 *buffer_len = 0;
+                Ok(ProcessingState::MessageProcessed)
             }
             Err(_) => {
                 // Packet might be incomplete, keep the data for next iteration
-                // The fixed buffer size already provides overflow protection
+                Ok(ProcessingState::IncompleteMessage)
             }
         }
-        Ok(())
     }
 
     /// Process outgoing messages to a client using fixed-size arrays for optimal embedded performance
@@ -374,7 +481,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                 // Ensure message fits in our fixed buffer
                 if serialized_msg.len() > MAX_PACKET_BUFFER_SIZE {
                     error!("Message too large: {} bytes, max: {}", serialized_msg.len(), MAX_PACKET_BUFFER_SIZE);
-                    return Err(anyhow::anyhow!("Message exceeds maximum buffer size"));
+                    return Err(anyhow!("Message exceeds maximum buffer size"));
                 }
                 
                 // Copy serialized data into our fixed buffer
@@ -393,7 +500,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                             break;
                         }
                         Err(e) => {
-                            return Err(anyhow::anyhow!("Failed to write to socket: {}", e));
+                            return Err(anyhow!("Failed to write to socket: {}", e));
                         }
                     }
                 }
@@ -405,7 +512,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                 // No messages to send
             }
             Err(TryRecvError::Disconnected) => {
-                return Err(anyhow::anyhow!("Client message channel disconnected"));
+                return Err(anyhow!("Client message channel disconnected"));
             }
         }
         Ok(())
@@ -414,12 +521,12 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
     /// Message distributor with optimized timeout for embedded systems
     fn message_distributor(
         &self,
-        client_response_rx: Receiver<GenericRawMessageData<T>>,
+        client_response_rx: Receiver<MessageWithAddress<T>>,
     ) -> Result<()> {
         // Use shorter timeout for better responsiveness on embedded systems
         let timeout = Duration::from_millis(DISTRIBUTOR_TIMEOUT_MS);
 
-        while self.server_running.load(Ordering::SeqCst) {
+        while self.thread_manager.is_running() {
             match client_response_rx.recv_timeout(timeout) {
                 Ok((msg, target_addr)) => {
                     // Scope the lock to minimize contention
@@ -436,11 +543,11 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                         debug!("No client found for address: {}", target_addr);
                     }
                 }
-                Err(channel::RecvTimeoutError::Timeout) => {
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                     // Timeout is expected, continue processing
                     continue;
                 }
-                Err(channel::RecvTimeoutError::Disconnected) => {
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                     info!("Message distributor channel disconnected");
                     break;
                 }

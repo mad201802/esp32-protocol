@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use anyhow::Result;
 use crossbeam::channel::Sender;
 
-use crate::application::{constants::MAX_CLIENTS_FIXED, message::ApplicationMessage};
+use crate::application::constants::MAX_CLIENTS_FIXED;
 
 /// Fixed-size client connection tracking for embedded devices
 #[derive(Clone, Copy)]
@@ -23,12 +23,12 @@ impl Default for ClientEntry {
     }
 }
 
-pub struct FixedClientRegistry {
+pub struct FixedClientRegistry<T> {
     entries: [ClientEntry; MAX_CLIENTS_FIXED],
-    senders: [Option<Sender<ApplicationMessage>>; MAX_CLIENTS_FIXED],
+    senders: [Option<Sender<T>>; MAX_CLIENTS_FIXED],
 }
 
-impl FixedClientRegistry {
+impl<T> FixedClientRegistry<T> {
     pub fn new() -> Self {
         Self {
             entries: [ClientEntry::default(); MAX_CLIENTS_FIXED],
@@ -36,7 +36,7 @@ impl FixedClientRegistry {
         }
     }
 
-    pub fn add_client(&mut self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
+    pub fn add_client(&mut self, ip: IpAddr, sender: Sender<T>) -> Result<()> {
         // Find existing entry or empty slot
         for (i, entry) in self.entries.iter_mut().enumerate() {
             if !entry.active || entry.ip == ip {
@@ -60,7 +60,7 @@ impl FixedClientRegistry {
         }
     }
 
-    pub fn get_sender(&self, ip: IpAddr) -> Option<&Sender<ApplicationMessage>> {
+    pub fn get_sender(&self, ip: IpAddr) -> Option<&Sender<T>> {
         for entry in &self.entries {
             if entry.active
                 && entry.ip == ip

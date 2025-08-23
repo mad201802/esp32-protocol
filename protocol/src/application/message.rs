@@ -5,6 +5,8 @@ use std::{
     sync::Arc,
 };
 
+use crate::application::serializable::Serializable;
+
 pub const MAX_PACKET_SIZE: usize = 1024;
 
 pub type RawMessageData = (ApplicationMessage, std::net::IpAddr);
@@ -162,13 +164,6 @@ impl ApplicationMessage {
         Ok(())
     }
 
-    /// Serialize the message to a byte vector
-    pub fn to_bytes(&self) -> anyhow::Result<Vec<u8>> {
-        let mut buffer = Vec::new();
-        self.serialize(&mut buffer)?;
-        Ok(buffer)
-    }
-
     /// Deserialize a message from a reader
     fn deserialize<R: Read>(reader: &mut R) -> anyhow::Result<Self> {
         let service_id = reader.read_u16::<BigEndian>()?;
@@ -193,15 +188,22 @@ impl ApplicationMessage {
         })
     }
 
-    /// Deserialize a message from bytes
-    pub fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
-        let mut cursor = std::io::Cursor::new(bytes);
-        Self::deserialize(&mut cursor)
-    }
-
     pub fn random_request_id() -> u16 {
         let mut rng = rand::rng();
         rng.random_range(0..=u16::MAX)
+    }
+}
+
+impl Serializable for ApplicationMessage {
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        self.serialize(&mut buffer).unwrap();
+        buffer
+    }
+
+    fn from_bytes(bytes: &[u8]) -> anyhow::Result<Self> {
+        let mut cursor = std::io::Cursor::new(bytes);
+        Self::deserialize(&mut cursor)
     }
 }
 
@@ -220,7 +222,7 @@ mod tests {
             vec![0x01, 0x02, 0x03, 0x04],
         );
 
-        let bytes = msg.to_bytes().unwrap();
+        let bytes = msg.to_bytes();
         let deserialized = ApplicationMessage::from_bytes(&bytes).unwrap();
 
         assert_eq!(msg, deserialized);
@@ -269,7 +271,7 @@ mod tests {
             vec![],
         );
 
-        let bytes = msg.to_bytes().unwrap();
+        let bytes = msg.to_bytes();
         let deserialized = ApplicationMessage::from_bytes(&bytes).unwrap();
 
         assert_eq!(msg, deserialized);
@@ -287,7 +289,7 @@ mod tests {
             large_payload.clone(),
         );
 
-        let bytes = msg.to_bytes().unwrap();
+        let bytes = msg.to_bytes();
         let deserialized = ApplicationMessage::from_bytes(&bytes).unwrap();
 
         assert_eq!(msg.payload.len(), large_payload.len());

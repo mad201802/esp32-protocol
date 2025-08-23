@@ -20,13 +20,12 @@ const ERROR_CODE_METHOD_NOT_FOUND: u8 = 0x03;
 const ERROR_CODE_TIMEOUT: u8 = 0x04;
 
 use crate::{
-    application::message::ApplicationResponseErrorMessage,
+    application::{TcpConnectionPool, message::ApplicationResponseErrorMessage},
     sd::{ServiceDiscovery, ServiceDiscoveryInterface},
     utils::retry_with_delay_option_sync,
 };
 
 use super::{
-    TcpConnectionPool,
     config::ServiceApplicationConfig,
     message::{
         ApplicationMessage, ApplicationMessageReturnCode, ApplicationMessageType,
@@ -46,7 +45,7 @@ pub struct ServiceApplication {
     service_discovery: Option<Box<dyn ServiceDiscoveryInterface>>,
 
     // TCP connection pool for handling all network communication
-    tcp_pool: Option<TcpConnectionPool>,
+    tcp_pool: Option<TcpConnectionPool<ApplicationMessage>>,
 
     // Key: Method ID, Value: Callback
     offered_methods: HashMap<u16, MethodInvokeCallback>,

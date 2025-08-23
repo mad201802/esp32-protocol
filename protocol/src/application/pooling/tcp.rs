@@ -19,28 +19,31 @@ use crate::application::{
         CHANNEL_CAPACITY, CONNECT_TIMEOUT_MS, DISTRIBUTOR_TIMEOUT_MS, MAX_BUFFER_GROWTH,
         MAX_CLIENTS_FIXED, POLL_INTERVAL_MS, TEMP_BUFFER_SIZE,
     },
-    message::{ApplicationMessage, RawMessageData},
     pooling::{buffer_pool::BufferPool, client_registry::FixedClientRegistry},
+    serializable::Serializable,
 };
+
+/// Generic raw message data type for any serializable message
+pub type GenericRawMessageData<T> = (T, std::net::IpAddr);
 
 /// TCP Connection Pool for managing client connections and message routing
 /// Optimized for embedded devices with minimal heap allocations
-pub struct TcpConnectionPool {
+pub struct TcpConnectionPool<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> {
     /// Fixed-size client registry instead of dynamic HashMap/HashSet
-    client_registry: Arc<Mutex<FixedClientRegistry>>,
+    client_registry: Arc<Mutex<FixedClientRegistry<T>>>,
 
     /// Buffer pool for reusing serialization buffers
     buffer_pool: Arc<BufferPool>,
 
     /// Channel for incoming messages from clients (received from TcpStream)
-    message_process_tx: Sender<RawMessageData>,
+    message_process_tx: Sender<GenericRawMessageData<T>>,
     /// Receiver for incoming messages from clients (used by ServiceApplication)
-    message_process_rx: Option<Receiver<RawMessageData>>,
+    message_process_rx: Option<Receiver<GenericRawMessageData<T>>>,
 
     /// Channel for outgoing messages to clients (received from ServiceApplication)
-    client_response_tx: Sender<RawMessageData>,
+    client_response_tx: Sender<GenericRawMessageData<T>>,
     /// Receiver for outgoing messages to clients (used by TcpStream handler)
-    client_response_rx: Option<Receiver<RawMessageData>>,
+    client_response_rx: Option<Receiver<GenericRawMessageData<T>>>,
 
     /// Server configuration
     bind_addr: IpAddr,
@@ -54,7 +57,7 @@ pub struct TcpConnectionPool {
     message_distributor_thread: Option<JoinHandle<()>>,
 }
 
-impl TcpConnectionPool {
+impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConnectionPool<T> {
     /// Create a new TCP connection pool with optimized settings for embedded devices
     pub fn new(bind_addr: IpAddr, port: u16, _max_sockets: usize, max_clients: usize) -> Self {
         let (message_process_tx, message_process_rx) = channel::bounded(CHANNEL_CAPACITY);
@@ -77,12 +80,12 @@ impl TcpConnectionPool {
     }
 
     /// Get the message processing receiver (used by ServiceApplication)
-    pub fn take_message_receiver(&mut self) -> Option<Receiver<RawMessageData>> {
+    pub fn take_message_receiver(&mut self) -> Option<Receiver<GenericRawMessageData<T>>> {
         self.message_process_rx.take()
     }
 
     /// Get the client response sender (used by ServiceApplication)
-    pub fn get_response_sender(&self) -> Sender<RawMessageData> {
+    pub fn get_response_sender(&self) -> Sender<GenericRawMessageData<T>> {
         self.client_response_tx.clone()
     }
 
@@ -239,7 +242,7 @@ impl TcpConnectionPool {
 
         tcp_stream.set_nonblocking(true)?;
 
-        let (this_client_tx, this_client_rx) = channel::unbounded::<ApplicationMessage>();
+        let (this_client_tx, this_client_rx) = channel::unbounded::<T>();
 
         // Register this client with capacity checks
         self.register_client(socket_addr.ip(), this_client_tx)?;
@@ -307,7 +310,7 @@ impl TcpConnectionPool {
     }
 
     /// Register a new client connection
-    fn register_client(&self, ip: IpAddr, sender: Sender<ApplicationMessage>) -> Result<()> {
+    fn register_client(&self, ip: IpAddr, sender: Sender<T>) -> Result<()> {
         let mut client_registry = self.client_registry.lock();
         if client_registry.len() >= self.max_clients {
             return Err(anyhow::anyhow!("Maximum client connections reached"));
@@ -342,7 +345,7 @@ impl TcpConnectionPool {
         *buffer_len += data.len();
 
         // Try to parse a complete message
-        match ApplicationMessage::from_bytes(&buffer[..*buffer_len]) {
+        match T::from_bytes(&buffer[..*buffer_len]) {
             Ok(packet) => {
                 // Send the message and reset buffer
                 self.message_process_tx.send((packet, ip))?;
@@ -360,7 +363,7 @@ impl TcpConnectionPool {
     fn process_outgoing_messages(
         &self,
         tcp_stream: &mut TcpStream,
-        client_rx: &Receiver<ApplicationMessage>,
+        client_rx: &Receiver<T>,
         socket_addr: SocketAddr,
     ) -> Result<()> {
         match client_rx.try_recv() {
@@ -372,7 +375,7 @@ impl TcpConnectionPool {
                 packet_data.clear();
 
                 // Serialize directly into our pooled buffer
-                let serialized_msg = ApplicationMessage::to_bytes(&msg)?;
+                let serialized_msg = msg.to_bytes();
                 packet_data.extend_from_slice(&serialized_msg);
 
                 // Handle partial writes for better reliability on embedded systems
@@ -411,7 +414,10 @@ impl TcpConnectionPool {
     }
 
     /// Message distributor with optimized timeout for embedded systems
-    fn message_distributor(&self, client_response_rx: Receiver<RawMessageData>) -> Result<()> {
+    fn message_distributor(
+        &self,
+        client_response_rx: Receiver<GenericRawMessageData<T>>,
+    ) -> Result<()> {
         // Use shorter timeout for better responsiveness on embedded systems
         let timeout = Duration::from_millis(DISTRIBUTOR_TIMEOUT_MS);
 

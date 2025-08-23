@@ -17,9 +17,9 @@ use parking_lot::Mutex;
 use crate::application::{
     constants::{
         CHANNEL_CAPACITY, CONNECT_TIMEOUT_MS, DISTRIBUTOR_TIMEOUT_MS, MAX_BUFFER_GROWTH,
-        MAX_CLIENTS_FIXED, POLL_INTERVAL_MS, TEMP_BUFFER_SIZE,
+        MAX_CLIENTS_FIXED, MAX_PACKET_BUFFER_SIZE, POLL_INTERVAL_MS, TEMP_BUFFER_SIZE,
     },
-    pooling::{buffer_pool::BufferPool, client_registry::FixedClientRegistry},
+    pooling::{client_registry::FixedClientRegistry},
     serializable::Serializable,
 };
 
@@ -31,9 +31,6 @@ pub type GenericRawMessageData<T> = (T, std::net::IpAddr);
 pub struct TcpConnectionPool<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> {
     /// Fixed-size client registry instead of dynamic HashMap/HashSet
     client_registry: Arc<Mutex<FixedClientRegistry<T>>>,
-
-    /// Buffer pool for reusing serialization buffers
-    buffer_pool: Arc<BufferPool>,
 
     /// Channel for incoming messages from clients (received from TcpStream)
     message_process_tx: Sender<GenericRawMessageData<T>>,
@@ -65,7 +62,6 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
 
         Self {
             client_registry: Arc::new(Mutex::new(FixedClientRegistry::new())),
-            buffer_pool: Arc::new(BufferPool::new(4)), // Small buffer pool for embedded use
             message_process_tx,
             message_process_rx: Some(message_process_rx),
             client_response_tx,
@@ -178,7 +174,6 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
     fn clone_for_thread(&self) -> Self {
         Self {
             client_registry: Arc::clone(&self.client_registry),
-            buffer_pool: Arc::clone(&self.buffer_pool),
             message_process_tx: self.message_process_tx.clone(),
             message_process_rx: None,
             client_response_tx: self.client_response_tx.clone(),
@@ -359,7 +354,7 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
         Ok(())
     }
 
-    /// Process outgoing messages to a client with buffer pool optimization
+    /// Process outgoing messages to a client using fixed-size arrays for optimal embedded performance
     fn process_outgoing_messages(
         &self,
         tcp_stream: &mut TcpStream,
@@ -370,18 +365,26 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
             Ok(msg) => {
                 trace!("Sending message to {:?}:{:?}", socket_addr, msg);
 
-                // Use buffer pool for serialization to avoid heap allocation
-                let mut packet_data = self.buffer_pool.get_buffer();
-                packet_data.clear();
-
-                // Serialize directly into our pooled buffer
+                // Use fixed-size array for serialization to avoid heap allocations
+                let mut packet_buffer = [0u8; MAX_PACKET_BUFFER_SIZE];
+                
+                // Serialize the message
                 let serialized_msg = msg.to_bytes();
-                packet_data.extend_from_slice(&serialized_msg);
+                
+                // Ensure message fits in our fixed buffer
+                if serialized_msg.len() > MAX_PACKET_BUFFER_SIZE {
+                    error!("Message too large: {} bytes, max: {}", serialized_msg.len(), MAX_PACKET_BUFFER_SIZE);
+                    return Err(anyhow::anyhow!("Message exceeds maximum buffer size"));
+                }
+                
+                // Copy serialized data into our fixed buffer
+                let packet_len = serialized_msg.len();
+                packet_buffer[..packet_len].copy_from_slice(&serialized_msg);
 
                 // Handle partial writes for better reliability on embedded systems
                 let mut total_written = 0;
-                while total_written < packet_data.len() {
-                    match tcp_stream.write(&packet_data[total_written..]) {
+                while total_written < packet_len {
+                    match tcp_stream.write(&packet_buffer[total_written..packet_len]) {
                         Ok(bytes_written) => {
                             total_written += bytes_written;
                         }
@@ -390,15 +393,10 @@ impl<T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static> TcpConne
                             break;
                         }
                         Err(e) => {
-                            // Return buffer to pool before error
-                            self.buffer_pool.return_buffer(packet_data);
                             return Err(anyhow::anyhow!("Failed to write to socket: {}", e));
                         }
                     }
                 }
-
-                // Return buffer to pool for reuse
-                self.buffer_pool.return_buffer(packet_data);
 
                 // Flush the stream to ensure data is sent
                 tcp_stream.flush().ok(); // Ignore flush errors as they're not critical

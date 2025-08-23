@@ -20,7 +20,7 @@ use crate::sd::{
 
 use super::{
     ServiceDiscoveryInterface, config::ServiceDiscoveryConfig, error::ServiceDiscoveryError,
-    packets::ServiceDiscoveryMessage,
+    message::ServiceDiscoveryMessage,
 };
 
 pub struct ServiceDiscovery {

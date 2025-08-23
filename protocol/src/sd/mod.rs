@@ -3,7 +3,7 @@ pub mod config;
 mod constants;
 pub mod error;
 pub mod interface;
-pub mod packets;
+pub mod message;
 mod registry;
 pub use self::_impl_sync::*;
 pub use self::error::{Result, ServiceDiscoveryError};

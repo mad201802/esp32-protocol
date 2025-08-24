@@ -1,15 +1,15 @@
 use std::{sync::Arc, thread, time::Duration};
 
 use anyhow::Result;
-use protocol::application::{
+use protocol::{application::{
     _impl_sync::ServiceApplication, message::ApplicationResponseErrorMessage,
-};
+}, sd::ServiceDiscovery};
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    let mut app = ServiceApplication::new(0x01);
-    app.init()?;
+    let mut app = ServiceApplication::<ServiceDiscovery>::new(0x01);
+    app.init_with_default_discovery()?;
 
     app.offer_method(
         0x01,

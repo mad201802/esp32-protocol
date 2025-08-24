@@ -3,19 +3,21 @@ use std::{
 };
 
 use anyhow::Result;
-use protocol::{application::{_impl_sync::ServiceApplication, config::ServiceApplicationConfig}, sd::config::ServiceDiscoveryConfig};
+use protocol::{application::{_impl_sync::ServiceApplication, config::ServiceApplicationConfig}, sd::{config::ServiceDiscoveryConfig, ServiceDiscovery}};
 
 fn main() -> Result<()> {
     env_logger::init();
 
     let mut service_application_config = ServiceApplicationConfig::default();
     let mut service_discovery_config = ServiceDiscoveryConfig::default();
+
     service_discovery_config
         .add_static_service(0x01, Ipv4Addr::new(192, 168, 0, 5).into());
+
     service_application_config.discovery_config = service_discovery_config;
 
-    let mut app = ServiceApplication::with_config(0x02, service_application_config);
-    app.init()?;
+    let mut app = ServiceApplication::<ServiceDiscovery>::with_config(0x02, service_application_config);
+    app.init_with_default_discovery()?;
     app.start(false)?;
 
     thread::sleep(Duration::from_secs(2));

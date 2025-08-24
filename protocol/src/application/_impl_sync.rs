@@ -23,7 +23,7 @@ mod error_codes {
 
 use crate::{
     application::{TcpConnectionPool, message::ApplicationResponseErrorMessage},
-    sd::{ServiceDiscovery, ServiceDiscoveryInterface},
+    sd::ServiceDiscoveryInterface,
     utils::retry_with_delay_option_sync,
 };
 
@@ -65,13 +65,16 @@ impl RequestTimeout {
 ///
 /// The service runs on a separate thread and uses TCP connections for communication.
 /// All operations are thread-safe and can be called from multiple threads.
-pub struct ServiceApplication {
+pub struct ServiceApplication<SD = crate::sd::ServiceDiscovery> 
+where
+    SD: ServiceDiscoveryInterface + Send + Sync + 'static,
+{
     // Core identification
     service_id: u16,
     config: ServiceApplicationConfig,
 
     // Service discovery for finding other services
-    service_discovery: Option<Box<dyn ServiceDiscoveryInterface>>,
+    service_discovery: Option<SD>,
 
     // Network communication
     tcp_pool: Option<TcpConnectionPool<ApplicationMessage>>,
@@ -94,7 +97,10 @@ pub struct ServiceApplication {
     server_running: Arc<AtomicBool>,
 }
 
-impl Clone for ServiceApplication {
+impl<SD> Clone for ServiceApplication<SD> 
+where
+    SD: ServiceDiscoveryInterface + Send + Sync + 'static,
+{
     /// Creates a clone of the ServiceApplication for use in worker threads.
     ///
     /// **Important**: Only shared state is cloned. Resource-managing fields like
@@ -123,7 +129,10 @@ impl Clone for ServiceApplication {
     }
 }
 
-impl ServiceApplication {
+impl<SD> ServiceApplication<SD> 
+where
+    SD: ServiceDiscoveryInterface + Send + Sync + 'static,
+{
     // ================================
     // Construction and Initialization
     // ================================
@@ -132,8 +141,8 @@ impl ServiceApplication {
     ///
     /// # Arguments
     /// * `service_id` - Unique identifier for this service
-    pub fn new(service_id: u16) -> Self {
-        Self::with_config(service_id, ServiceApplicationConfig::default())
+    pub fn new(service_id: u16) -> ServiceApplication<crate::sd::ServiceDiscovery> {
+        ServiceApplication::<crate::sd::ServiceDiscovery>::with_config(service_id, ServiceApplicationConfig::default())
     }
 
     /// Creates a new ServiceApplication with custom configuration
@@ -141,12 +150,12 @@ impl ServiceApplication {
     /// # Arguments
     /// * `service_id` - Unique identifier for this service
     /// * `config` - Service configuration parameters
-    pub fn with_config(service_id: u16, config: ServiceApplicationConfig) -> Self {
+    pub fn with_config(service_id: u16, config: ServiceApplicationConfig) -> ServiceApplication<crate::sd::ServiceDiscovery> {
         info!("Creating new service application with ID: {}", service_id);
 
         let max_open_requests = config.max_open_requests;
 
-        Self {
+        ServiceApplication {
             // Core identification
             service_id,
             config,
@@ -166,15 +175,74 @@ impl ServiceApplication {
         }
     }
 
+    /// Creates a new ServiceApplication with a custom service discovery implementation
+    ///
+    /// # Arguments
+    /// * `service_id` - Unique identifier for this service
+    /// * `config` - Service configuration parameters
+    /// * `service_discovery` - Custom service discovery implementation
+    pub fn with_service_discovery(
+        service_id: u16, 
+        config: ServiceApplicationConfig, 
+        service_discovery: SD
+    ) -> Self {
+        info!("Creating new service application with ID: {} and custom service discovery", service_id);
+
+        let max_open_requests = config.max_open_requests;
+
+        Self {
+            // Core identification
+            service_id,
+            config,
+
+            // Resource managers (initialized later)
+            service_discovery: Some(service_discovery),
+            tcp_pool: None,
+            message_handler_thread: None,
+            timeout_handler_thread: None,
+
+            // Shared state
+            offered_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
+            subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
+            offered_methods: HashMap::with_capacity(8),
+            open_requests: Arc::new(Mutex::new(HashMap::with_capacity(max_open_requests))),
+            server_running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     /// Initialize the application (service discovery, etc.)
     pub fn init(&mut self) -> Result<()> {
+        // Only initialize if service discovery is not already present
+        if self.service_discovery.is_none() {
+            return Err(anyhow::anyhow!("Service discovery not initialized. Use init_with_default_discovery() or provide a service discovery implementation."));
+        }
+
         // Initialize the service discovery component
-        let mut service_discovery = ServiceDiscovery::with_config(self.service_id, self.config.discovery_config.clone());
-        service_discovery.init()?;
-        self.service_discovery = Some(Box::new(service_discovery));
+        if let Some(service_discovery) = self.service_discovery.as_mut() {
+            service_discovery.init()?;
+        }
 
         Ok(())
     }
+}
+
+// Additional implementation for the default ServiceDiscovery type
+impl ServiceApplication<crate::sd::ServiceDiscovery> {
+    /// Initialize the application with the default service discovery implementation
+    pub fn init_with_default_discovery(&mut self) -> Result<()> {
+        // Initialize the service discovery component
+        let mut service_discovery = crate::sd::ServiceDiscovery::with_config(self.service_id, self.config.discovery_config.clone());
+        service_discovery.init()?;
+        self.service_discovery = Some(service_discovery);
+
+        Ok(())
+    }
+}
+
+impl<SD> ServiceApplication<SD> 
+where
+    SD: ServiceDiscoveryInterface + Send + Sync + 'static,
+{
 
     // =====================================
     // Service Interface (Methods & Events)

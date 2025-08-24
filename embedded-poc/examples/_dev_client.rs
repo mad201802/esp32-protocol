@@ -9,6 +9,7 @@ use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use protocol::application::_impl_sync::ServiceApplication;
+use protocol::sd::ServiceDiscovery;
 
 fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -49,9 +50,9 @@ fn main() -> Result<()> {
         &sys_loop,
     );
 
-    let mut app = ServiceApplication::new(0x02);
+    let mut app = ServiceApplication::<ServiceDiscovery>::new(0x02);
 
-    app.init()?;
+    app.init_with_default_discovery()?;
 
     thread::sleep(Duration::from_secs(1));
 

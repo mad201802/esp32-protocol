@@ -10,6 +10,7 @@ use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use protocol::application::_impl_sync::ServiceApplication;
+use protocol::sd::ServiceDiscovery;
 
 // Turn signal states
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,9 +60,8 @@ fn main() -> Result<()> {
         &sys_loop,
     );
 
-    let mut app = ServiceApplication::new(0x01);
-
-    app.init()?;
+    let mut app = ServiceApplication::<ServiceDiscovery>::new(0x01);
+    app.init_with_default_discovery()?;
 
     // Shared signal state using AtomicU8 to represent the enum
     let signal_state = Arc::new(AtomicU8::new(SignalState::Off as u8));

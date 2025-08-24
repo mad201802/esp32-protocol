@@ -10,6 +10,7 @@ use esp_idf_svc::hal::gpio::PinDriver;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use protocol::application::_impl_sync::ServiceApplication;
+use protocol::sd::ServiceDiscovery;
 
 // Turn signal states
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,9 +60,9 @@ fn main() -> Result<()> {
         &sys_loop,
     );
 
-    let mut app = ServiceApplication::new(0x01);
+    let mut app = ServiceApplication::<ServiceDiscovery>::new(0x01);
 
-    app.init()?;
+    app.init_with_default_discovery()?;
 
     // LED pin setup - using GPIO 14 for left, GPIO 15 for right
     let gpio14 = pins.gpio14;

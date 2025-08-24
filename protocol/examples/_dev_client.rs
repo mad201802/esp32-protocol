@@ -5,13 +5,13 @@ use std::{
 };
 
 use anyhow::Result;
-use protocol::application::_impl_sync::ServiceApplication;
+use protocol::{application::_impl_sync::ServiceApplication, sd::ServiceDiscovery};
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    let mut app = ServiceApplication::new(rand::random::<u16>());
-    app.init()?;
+    let mut app = ServiceApplication::<ServiceDiscovery>::new(rand::random::<u16>());
+    app.init_with_default_discovery()?;
     app.start(false)?;
 
     thread::sleep(Duration::from_secs(2));

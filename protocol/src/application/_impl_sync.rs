@@ -169,7 +169,7 @@ impl ServiceApplication {
     /// Initialize the application (service discovery, etc.)
     pub fn init(&mut self) -> Result<()> {
         // Initialize the service discovery component
-        let mut service_discovery = ServiceDiscovery::new(self.service_id);
+        let mut service_discovery = ServiceDiscovery::with_config(self.service_id, self.config.discovery_config.clone());
         service_discovery.init()?;
         self.service_discovery = Some(Box::new(service_discovery));
 

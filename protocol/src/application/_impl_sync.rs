@@ -211,7 +211,7 @@ where
     }
 
     /// Initialize the application (service discovery, etc.)
-    pub fn init(&mut self) -> Result<()> {
+    pub fn init_without_default_discovery(&mut self) -> Result<()> {
         // Only initialize if service discovery is not already present
         if self.service_discovery.is_none() {
             return Err(anyhow::anyhow!("Service discovery not initialized. Use init_with_default_discovery() or provide a service discovery implementation."));
@@ -229,7 +229,7 @@ where
 // Additional implementation for the default ServiceDiscovery type
 impl ServiceApplication<crate::sd::ServiceDiscovery> {
     /// Initialize the application with the default service discovery implementation
-    pub fn init_with_default_discovery(&mut self) -> Result<()> {
+    pub fn init(&mut self) -> Result<()> {
         // Initialize the service discovery component
         let mut service_discovery = crate::sd::ServiceDiscovery::with_config(self.service_id, self.config.discovery_config.clone());
         service_discovery.init()?;

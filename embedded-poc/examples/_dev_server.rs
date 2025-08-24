@@ -62,7 +62,7 @@ fn main() -> Result<()> {
 
     let mut app = ServiceApplication::<ServiceDiscovery>::new(0x01);
 
-    app.init_with_default_discovery()?;
+    app.init()?;
 
     // LED pin setup - using GPIO 14 for left, GPIO 15 for right
     let gpio14 = pins.gpio14;

@@ -17,7 +17,7 @@ fn main() -> Result<()> {
     service_application_config.discovery_config = service_discovery_config;
 
     let mut app = ServiceApplication::<ServiceDiscovery>::with_config(0x02, service_application_config);
-    app.init_with_default_discovery()?;
+    app.init()?;
     app.start(false)?;
 
     thread::sleep(Duration::from_secs(2));

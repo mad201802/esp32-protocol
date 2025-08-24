@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     env_logger::init();
 
     let mut app = ServiceApplication::<ServiceDiscovery>::new(rand::random::<u16>());
-    app.init_with_default_discovery()?;
+    app.init()?;
     app.start(false)?;
 
     thread::sleep(Duration::from_secs(2));

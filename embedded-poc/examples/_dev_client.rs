@@ -52,7 +52,7 @@ fn main() -> Result<()> {
 
     let mut app = ServiceApplication::<ServiceDiscovery>::new(0x02);
 
-    app.init_with_default_discovery()?;
+    app.init()?;
 
     thread::sleep(Duration::from_secs(1));
 

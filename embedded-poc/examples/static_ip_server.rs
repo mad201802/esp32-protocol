@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     );
 
     let mut app = ServiceApplication::<ServiceDiscovery>::new(0x01);
-    app.init_with_default_discovery()?;
+    app.init()?;
 
     // Shared signal state using AtomicU8 to represent the enum
     let signal_state = Arc::new(AtomicU8::new(SignalState::Off as u8));

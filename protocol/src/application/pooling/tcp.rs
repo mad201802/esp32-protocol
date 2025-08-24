@@ -56,6 +56,8 @@ pub trait ProtocolMessage: Serializable + Clone + Send + Sync + std::fmt::Debug 
 impl<T> ProtocolMessage for T where T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static {}
 
 /// Configuration for the TCP connection pool
+///
+/// Note: `max_clients` is capped at `MAX_CLIENTS_FIXED` in the constructor (`TcpPoolConfig::new`).
 #[derive(Debug, Clone)]
 pub struct TcpPoolConfig {
     pub bind_addr: IpAddr,
@@ -143,7 +145,7 @@ pub struct TcpConnectionPool<T: ProtocolMessage> {
 
 impl<T: ProtocolMessage> TcpConnectionPool<T> {
     /// Create a new TCP connection pool with optimized settings for embedded devices
-    pub fn new(bind_addr: IpAddr, port: u16, _max_sockets: usize, max_clients: usize) -> Self {
+    pub fn new(bind_addr: IpAddr, port: u16, max_clients: usize) -> Self {
         let (message_process_tx, message_process_rx) = channel::bounded(CHANNEL_CAPACITY);
         let (client_response_tx, client_response_rx) = channel::bounded(CHANNEL_CAPACITY);
 
@@ -173,7 +175,12 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
         self.thread_manager.start();
 
         // Start message distributor thread
-        let client_response_rx = self.client_response_rx.take().unwrap();
+        let client_response_rx = match self.client_response_rx.take() {
+            Some(rx) => rx,
+            None => {
+                return Err(anyhow!("Client response receiver already taken"));
+            }
+        };
         let pool_for_distributor = self.clone_for_thread();
         let message_distributor_thread = thread::spawn(move || {
             if let Err(e) = pool_for_distributor.message_distributor(client_response_rx) {
@@ -280,7 +287,7 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
                 Ok(socket) => {
                     let addr = socket
                         .peer_addr()
-                        .unwrap_or_else(|_| "unknown".parse::<SocketAddr>().unwrap());
+                        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
                     info!("[Connected] {:?}", addr);
 
                     let pool = self.clone_for_thread();
@@ -490,7 +497,9 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
                 }
 
                 // Flush the stream to ensure data is sent
-                tcp_stream.flush().ok(); // Ignore flush errors as they're not critical
+                if let Err(e) = tcp_stream.flush() {
+                    error!("Failed to flush TCP stream to {}: {}", socket_addr, e);
+                }
             }
             Err(TryRecvError::Empty) => {
                 // No messages to send

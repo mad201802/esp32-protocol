@@ -21,8 +21,6 @@ pub struct ServiceApplicationConfig {
     pub sleep_interval: Duration,
     /// Interval to check for request timeouts
     pub request_timeout_check_interval: Duration,
-    /// Maximum number of sockets to open
-    pub max_sockets: usize,
     /// Maximum number of clients that can connect
     pub max_clients: usize,
 }
@@ -38,7 +36,6 @@ impl Default for ServiceApplicationConfig {
             subscription_timeout: Duration::from_millis(1000),
             sleep_interval: Duration::from_millis(10),
             request_timeout_check_interval: Duration::from_millis(1000),
-            max_sockets: 8,
             max_clients: 8,
         }
     }

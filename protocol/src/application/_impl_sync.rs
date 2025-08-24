@@ -63,6 +63,13 @@ pub struct ServiceApplication {
     server_running: Arc<AtomicBool>,
 }
 
+///
+/// Custom `Clone` implementation for `ServiceApplication`.
+///
+/// Only shared state (such as offered methods, events, and open requests) is cloned.
+/// Fields that manage resources or threads (such as `service_discovery`, `tcp_pool`, and thread handles)
+/// are intentionally not cloned to avoid resource conflicts and undefined behavior.
+///
 impl Clone for ServiceApplication {
     fn clone(&self) -> Self {
         Self {
@@ -673,6 +680,11 @@ impl ServiceApplication {
     }
 
     pub fn start(&mut self, blocking: bool) -> Result<()> {
+        if self.server_running.load(Ordering::SeqCst) {
+            error!("Server is already running");
+            return Err(anyhow::anyhow!("Server is already running"));
+        }
+        
         if self.service_discovery.is_none() {
             error!("Service discovery is not initialized");
             return Err(anyhow::anyhow!("Service discovery is not initialized"));
@@ -688,7 +700,6 @@ impl ServiceApplication {
         let mut tcp_pool = TcpConnectionPool::new(
             self.config.bind_addr,
             self.config.port,
-            self.config.max_sockets,
             self.config.max_clients,
         );
 
@@ -798,15 +809,15 @@ impl ServiceApplication {
                 let mut to_remove = Vec::new();
 
                 for (&request_id, request_timeout) in open_requests.iter() {
-                    if now > request_timeout.deadline {
-                        timed_out_requests.push((request_id, request_timeout.callback.clone()));
+                            if now > request_timeout.deadline {
+                                timed_out_requests.push((request_id, request_timeout.callback.clone()));
                         to_remove.push(request_id);
                     }
                 }
 
                 // Remove timed out requests
                 for request_id in to_remove {
-                    open_requests.remove(&request_id);
+                                open_requests.remove(&request_id);
                 }
             }
 
@@ -818,7 +829,7 @@ impl ServiceApplication {
                     "Request timed out".to_string(),
                 );
                 let _result = callback(Err(timeout_error));
-            }
+    }
 
             thread::sleep(self.config.request_timeout_check_interval);
         }

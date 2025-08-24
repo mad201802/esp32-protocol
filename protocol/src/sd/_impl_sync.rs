@@ -190,6 +190,11 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
     /// - Receiver thread listens for incoming service announcements
     /// - Sender thread broadcasts this service's availability periodically
     fn start(&mut self) -> Result<()> {
+        if self.server_running.load(Ordering::SeqCst) {
+            debug!("Service discovery with ID {} is already running", self.service_id);
+            return Ok(());
+        }
+
         if self.socket.is_none() {
             return Err(anyhow::anyhow!("Socket not initialized"));
         }

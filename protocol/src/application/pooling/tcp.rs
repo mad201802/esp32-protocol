@@ -173,17 +173,6 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
         self.client_response_tx.clone()
     }
 
-    /// Check if the pool is currently running
-    pub fn is_running(&self) -> bool {
-        self.thread_manager.is_running()
-    }
-
-    /// Get the number of active connections
-    pub fn active_connection_count(&self) -> usize {
-        let client_registry = self.client_registry.lock();
-        client_registry.len()
-    }
-
     /// Start the TCP server and message distributor
     pub fn start(&mut self, blocking: bool) -> Result<()> {
         self.thread_manager.start();

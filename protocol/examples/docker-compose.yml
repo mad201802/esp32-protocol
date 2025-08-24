@@ -3,7 +3,6 @@ services:
     image: debian:bookworm-slim
     environment:
       - RUST_LOG=debug
-    stop_grace_period: 1s
     volumes:
       - ../:/app
     command: sh -c "/app/target/debug/examples/_dev_server"
@@ -14,7 +13,6 @@ services:
     image: debian:bookworm-slim
     environment:
       - RUST_LOG=debug
-    stop_grace_period: 1s
     volumes:
       - ../:/app
     command: sh -c "/app/target/debug/examples/_dev_client"

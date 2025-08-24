@@ -22,14 +22,16 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use crossbeam::channel::{self, Receiver, Sender, TryRecvError};
 use log::{debug, error, info, trace};
 use parking_lot::Mutex;
 
 use crate::application::{
     constants::{
-        CHANNEL_CAPACITY, CONNECT_TIMEOUT_MS, DISTRIBUTOR_TIMEOUT_MS, INACTIVE_READ_THRESHOLD, INACTIVE_SLEEP_MULTIPLIER, MAX_BUFFER_GROWTH, MAX_CLIENTS_FIXED, MAX_PACKET_BUFFER_SIZE, POLL_INTERVAL_MS, TEMP_BUFFER_SIZE
+        CHANNEL_CAPACITY, CONNECT_TIMEOUT_MS, DISTRIBUTOR_TIMEOUT_MS, INACTIVE_READ_THRESHOLD,
+        INACTIVE_SLEEP_MULTIPLIER, MAX_BUFFER_GROWTH, MAX_CLIENTS_FIXED, MAX_PACKET_BUFFER_SIZE,
+        POLL_INTERVAL_MS, TEMP_BUFFER_SIZE,
     },
     pooling::client_registry::FixedClientRegistry,
     serializable::Serializable,
@@ -53,7 +55,8 @@ enum ProcessingState {
 pub trait ProtocolMessage: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static {}
 
 // Blanket implementation for all types that satisfy the constraints
-impl<T> ProtocolMessage for T where T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static {}
+impl<T> ProtocolMessage for T where T: Serializable + Clone + Send + Sync + std::fmt::Debug + 'static
+{}
 
 /// Configuration for the TCP connection pool
 ///
@@ -97,19 +100,19 @@ impl ThreadManager {
 
     fn stop(&mut self) -> Result<()> {
         info!("Stopping TCP connection pool threads");
-        
+
         self.is_running.store(false, Ordering::SeqCst);
 
-        if let Some(server_thread) = self.server_thread.take() {
-            if let Err(e) = server_thread.join() {
-                error!("Server thread panicked: {:?}", e);
-            }
+        if let Some(server_thread) = self.server_thread.take()
+            && let Err(e) = server_thread.join()
+        {
+            error!("Server thread panicked: {:?}", e);
         }
 
-        if let Some(message_distributor_thread) = self.message_distributor_thread.take() {
-            if let Err(e) = message_distributor_thread.join() {
-                error!("Message distributor thread panicked: {:?}", e);
-            }
+        if let Some(message_distributor_thread) = self.message_distributor_thread.take()
+            && let Err(e) = message_distributor_thread.join()
+        {
+            error!("Message distributor thread panicked: {:?}", e);
         }
 
         Ok(())
@@ -264,14 +267,15 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
 
     /// Start listening for incoming TCP connections
     fn start_listening(&self) -> Result<()> {
-        let listener = TcpListener::bind((self.config.bind_addr, self.config.port)).map_err(|e| {
-            anyhow!(
-                "Failed to bind TCP listener to {}:{}: {}",
-                self.config.bind_addr,
-                self.config.port,
-                e
-            )
-        })?;
+        let listener =
+            TcpListener::bind((self.config.bind_addr, self.config.port)).map_err(|e| {
+                anyhow!(
+                    "Failed to bind TCP listener to {}:{}: {}",
+                    self.config.bind_addr,
+                    self.config.port,
+                    e
+                )
+            })?;
 
         info!(
             "Listening for incoming connections on {}:{}",
@@ -368,11 +372,12 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
             }
 
             // Adaptive sleep based on activity - sleep longer when inactive to save CPU
-            let sleep_duration = if had_activity || consecutive_empty_reads < INACTIVE_READ_THRESHOLD {
-                Duration::from_millis(POLL_INTERVAL_MS)
-            } else {
-                Duration::from_millis(POLL_INTERVAL_MS * INACTIVE_SLEEP_MULTIPLIER) // Double sleep time when inactive
-            };
+            let sleep_duration =
+                if had_activity || consecutive_empty_reads < INACTIVE_READ_THRESHOLD {
+                    Duration::from_millis(POLL_INTERVAL_MS)
+                } else {
+                    Duration::from_millis(POLL_INTERVAL_MS * INACTIVE_SLEEP_MULTIPLIER) // Double sleep time when inactive
+                };
 
             thread::sleep(sleep_duration);
         }
@@ -403,7 +408,7 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
         ip: IpAddr,
     ) -> Result<()> {
         let processing_result = self.try_process_data(buffer, buffer_len, data, ip)?;
-        
+
         match processing_result {
             ProcessingState::MessageProcessed => {
                 trace!("Successfully processed message from {}", ip);
@@ -415,7 +420,7 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
                 debug!("Buffer reset for client {}", ip);
             }
         }
-        
+
         Ok(())
     }
 
@@ -465,16 +470,20 @@ impl<T: ProtocolMessage> TcpConnectionPool<T> {
 
                 // Use fixed-size array for serialization to avoid heap allocations
                 let mut packet_buffer = [0u8; MAX_PACKET_BUFFER_SIZE];
-                
+
                 // Serialize the message
                 let serialized_msg = msg.to_bytes();
-                
+
                 // Ensure message fits in our fixed buffer
                 if serialized_msg.len() > MAX_PACKET_BUFFER_SIZE {
-                    error!("Message too large: {} bytes, max: {}", serialized_msg.len(), MAX_PACKET_BUFFER_SIZE);
+                    error!(
+                        "Message too large: {} bytes, max: {}",
+                        serialized_msg.len(),
+                        MAX_PACKET_BUFFER_SIZE
+                    );
                     return Err(anyhow!("Message exceeds maximum buffer size"));
                 }
-                
+
                 // Copy serialized data into our fixed buffer
                 let packet_len = serialized_msg.len();
                 packet_buffer[..packet_len].copy_from_slice(&serialized_msg);

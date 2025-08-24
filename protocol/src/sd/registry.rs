@@ -157,7 +157,12 @@ impl ServiceRegistry {
         for (&service_id, &ip_addr) in static_services.iter() {
             if let Err(e) = self.insert_static(service_id, ip_addr) {
                 // Log error but continue loading other services
-                log::warn!("Failed to load static service {} -> {}: {}", service_id, ip_addr, e);
+                log::warn!(
+                    "Failed to load static service {} -> {}: {}",
+                    service_id,
+                    ip_addr,
+                    e
+                );
             }
         }
         Ok(())

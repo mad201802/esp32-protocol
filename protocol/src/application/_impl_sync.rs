@@ -48,28 +48,28 @@ impl RequestTimeout {
             deadline: Instant::now() + timeout_duration,
         }
     }
-    
+
     fn is_expired(&self) -> bool {
         Instant::now() > self.deadline
     }
 }
 
 /// A service application that handles network communication using the application protocol.
-/// 
+///
 /// This service can:
 /// - Offer methods that can be called by remote services
 /// - Offer events that remote services can subscribe to  
 /// - Call methods on remote services
 /// - Subscribe to events from remote services
 /// - Handle automatic service discovery
-/// 
+///
 /// The service runs on a separate thread and uses TCP connections for communication.
 /// All operations are thread-safe and can be called from multiple threads.
 pub struct ServiceApplication {
     // Core identification
     service_id: u16,
     config: ServiceApplicationConfig,
-    
+
     // Service discovery for finding other services
     service_discovery: Option<Box<dyn ServiceDiscoveryInterface>>,
 
@@ -81,7 +81,7 @@ pub struct ServiceApplication {
 
     // Event handling: Key = Event ID, Value = Set of subscriber IPs
     offered_events: Arc<Mutex<HashMap<u16, HashSet<IpAddr>>>>,
-    
+
     // Event subscriptions: Key = Event ID, Value = Callback for incoming events
     subscribed_events: Arc<Mutex<HashMap<u16, OnEventInvokeCallback>>>,
 
@@ -96,7 +96,7 @@ pub struct ServiceApplication {
 
 impl Clone for ServiceApplication {
     /// Creates a clone of the ServiceApplication for use in worker threads.
-    /// 
+    ///
     /// **Important**: Only shared state is cloned. Resource-managing fields like
     /// service_discovery, tcp_pool, and thread handles are set to None to prevent
     /// resource conflicts. This clone is intended for worker threads that need
@@ -106,13 +106,13 @@ impl Clone for ServiceApplication {
             // Core identification (safe to clone)
             service_id: self.service_id,
             config: self.config.clone(),
-            
+
             // Resource managers (NOT cloned to avoid conflicts)
             service_discovery: None,
             tcp_pool: None,
             message_handler_thread: None,
             timeout_handler_thread: None,
-            
+
             // Shared state (cloned via Arc)
             offered_methods: self.offered_methods.clone(),
             offered_events: Arc::clone(&self.offered_events),
@@ -125,9 +125,9 @@ impl Clone for ServiceApplication {
 
 impl ServiceApplication {
     // ================================
-    // Construction and Initialization  
+    // Construction and Initialization
     // ================================
-    
+
     /// Creates a new ServiceApplication with default configuration
     ///
     /// # Arguments
@@ -150,13 +150,13 @@ impl ServiceApplication {
             // Core identification
             service_id,
             config,
-            
+
             // Resource managers (initialized later)
             service_discovery: None,
             tcp_pool: None,
             message_handler_thread: None,
             timeout_handler_thread: None,
-            
+
             // Shared state
             offered_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
             subscribed_events: Arc::new(Mutex::new(HashMap::with_capacity(8))),
@@ -244,16 +244,15 @@ impl ServiceApplication {
         }
     }
 
-
     // ==============================
     // Remote Service Communication
     // ==============================
 
     /// Resolves a service ID to its IP address and ensures TCP connection
-    /// 
+    ///
     /// # Arguments
     /// * `service_id` - ID of the service to find
-    /// 
+    ///
     /// # Returns
     /// * `Some(IpAddr)` if service found and connected
     /// * `None` if service not found or connection failed
@@ -261,16 +260,13 @@ impl ServiceApplication {
         trace!("Finding service with ID: {}", service_id);
 
         let service_discovery = self.service_discovery.as_ref()?;
-        let ip_addr = retry_with_delay_option_sync(
-            || service_discovery.find_service(service_id), 
-            4, 
-            500
-        )?;
+        let ip_addr =
+            retry_with_delay_option_sync(|| service_discovery.find_service(service_id), 4, 500)?;
 
         trace!("Found service with ID: {} at {:?}", service_id, ip_addr);
 
         let tcp_pool = self.tcp_pool.as_ref()?;
-        
+
         if tcp_pool.is_connected(ip_addr) {
             return Some(ip_addr);
         }
@@ -281,7 +277,10 @@ impl ServiceApplication {
             return None;
         }
 
-        trace!("Connected to service with ID: {} at {:?}", service_id, ip_addr);
+        trace!(
+            "Connected to service with ID: {} at {:?}",
+            service_id, ip_addr
+        );
         Some(ip_addr)
     }
 
@@ -331,7 +330,8 @@ impl ServiceApplication {
             match sender.send((request_packet, ip_addr)) {
                 Ok(_) => {
                     let mut open_requests = self.open_requests.lock();
-                    let request_timeout = RequestTimeout::new(callback, self.config.method_call_timeout);
+                    let request_timeout =
+                        RequestTimeout::new(callback, self.config.method_call_timeout);
                     open_requests.insert(request_id, request_timeout);
                     debug!("Sent method call request with ID: {}", request_id);
                 }
@@ -383,7 +383,10 @@ impl ServiceApplication {
     /// * `service_id` - ID of the service offering the event
     /// * `event_id` - ID of the event to unsubscribe from
     pub fn unsubscribe(&mut self, service_id: u16, event_id: u16) {
-        debug!("Unsubscribing from event {} on service {}", event_id, service_id);
+        debug!(
+            "Unsubscribing from event {} on service {}",
+            event_id, service_id
+        );
 
         // Remove the event callback from local subscriptions first
         {
@@ -399,7 +402,10 @@ impl ServiceApplication {
         let ip_addr = match self.service_to_ip(service_id) {
             Some(addr) => addr,
             None => {
-                error!("Could not find service with ID: {} for unsubscribe", service_id);
+                error!(
+                    "Could not find service with ID: {} for unsubscribe",
+                    service_id
+                );
                 return;
             }
         };
@@ -418,7 +424,10 @@ impl ServiceApplication {
             let sender = tcp_pool.get_response_sender();
             match sender.send((unsubscribe_packet, ip_addr)) {
                 Ok(_) => {
-                    debug!("Sent unsubscribe request for event {} to service {}", event_id, service_id);
+                    debug!(
+                        "Sent unsubscribe request for event {} to service {}",
+                        event_id, service_id
+                    );
                 }
                 Err(err) => {
                     error!("Failed to send unsubscribe packet: {:?}", err);
@@ -428,7 +437,6 @@ impl ServiceApplication {
             error!("TCP pool not available for unsubscribe");
         }
     }
-
 
     // ===============================
     // Private Subscription Helpers
@@ -465,7 +473,10 @@ impl ServiceApplication {
             return None;
         }
 
-        debug!("Sent subscription request for event {} with request_id {}", event_id, request_id);
+        debug!(
+            "Sent subscription request for event {} with request_id {}",
+            event_id, request_id
+        );
         self.wait_for_subscription_response(request_id, event_id)
     }
 
@@ -520,7 +531,6 @@ impl ServiceApplication {
         }
     }
 
-
     // ========================
     // Message Processing Core
     // ========================
@@ -572,7 +582,6 @@ impl ServiceApplication {
             }
         }
     }
-
 
     // =======================
     // Message Type Handlers
@@ -669,9 +678,15 @@ impl ServiceApplication {
             );
 
             if let Err(e) = response_sender.send((unsubscribe_packet, addr)) {
-                error!("Failed to send unsubscribe message for unwanted notification: {}", e);
+                error!(
+                    "Failed to send unsubscribe message for unwanted notification: {}",
+                    e
+                );
             } else {
-                debug!("Sent unsubscribe message for event {} to {:?}", packet.method_id, addr);
+                debug!(
+                    "Sent unsubscribe message for event {} to {:?}",
+                    packet.method_id, addr
+                );
             }
         }
     }
@@ -700,7 +715,10 @@ impl ServiceApplication {
                 error!("Failed to send subscription response: {}", e);
             }
         } else {
-            error!("Event {} not offered, rejecting subscription from {:?}", packet.method_id, addr);
+            error!(
+                "Event {} not offered, rejecting subscription from {:?}",
+                packet.method_id, addr
+            );
 
             let response_packet = self.create_error_response_packet(
                 packet.service_id,
@@ -725,16 +743,15 @@ impl ServiceApplication {
         }
     }
 
-
     // ========================
     // Service Lifecycle
     // ========================
 
     /// Starts the service application
-    /// 
+    ///
     /// # Arguments
     /// * `blocking` - If true, blocks until service is stopped. If false, returns immediately.
-    /// 
+    ///
     /// # Returns
     /// * `Ok(())` on successful startup
     /// * `Err(...)` if startup fails
@@ -743,7 +760,7 @@ impl ServiceApplication {
             error!("Server is already running");
             return Err(anyhow::anyhow!("Server is already running"));
         }
-        
+
         if self.service_discovery.is_none() {
             error!("Service discovery is not initialized");
             return Err(anyhow::anyhow!("Service discovery is not initialized"));
@@ -807,7 +824,10 @@ impl ServiceApplication {
 
     /// Gracefully shutdown the service application
     pub fn shutdown(&mut self) -> Result<()> {
-        info!("Shutting down service application with ID: {}", self.service_id);
+        info!(
+            "Shutting down service application with ID: {}",
+            self.service_id
+        );
 
         // Signal threads to stop
         self.server_running.store(false, Ordering::SeqCst);

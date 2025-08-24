@@ -7,3 +7,7 @@ pub const CONNECT_TIMEOUT_MS: u64 = 100; // Reduced connection wait time
 pub const DISTRIBUTOR_TIMEOUT_MS: u64 = 50; // Message distributor timeout
 pub const MAX_PACKET_BUFFER_SIZE: usize = 512; // Fixed size for packet serialization buffer
 pub const MAX_CLIENTS_FIXED: usize = 8; // Fixed maximum clients for embedded use
+
+/// Constants for improved readability
+pub const INACTIVE_READ_THRESHOLD: u8 = 10;
+pub const INACTIVE_SLEEP_MULTIPLIER: u64 = 2;

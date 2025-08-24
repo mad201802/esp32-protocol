@@ -29,16 +29,11 @@ use parking_lot::Mutex;
 
 use crate::application::{
     constants::{
-        CHANNEL_CAPACITY, CONNECT_TIMEOUT_MS, DISTRIBUTOR_TIMEOUT_MS, MAX_BUFFER_GROWTH,
-        MAX_CLIENTS_FIXED, MAX_PACKET_BUFFER_SIZE, POLL_INTERVAL_MS, TEMP_BUFFER_SIZE,
+        CHANNEL_CAPACITY, CONNECT_TIMEOUT_MS, DISTRIBUTOR_TIMEOUT_MS, INACTIVE_READ_THRESHOLD, INACTIVE_SLEEP_MULTIPLIER, MAX_BUFFER_GROWTH, MAX_CLIENTS_FIXED, MAX_PACKET_BUFFER_SIZE, POLL_INTERVAL_MS, TEMP_BUFFER_SIZE
     },
-    pooling::{client_registry::FixedClientRegistry},
+    pooling::client_registry::FixedClientRegistry,
     serializable::Serializable,
 };
-
-/// Constants for improved readability
-const INACTIVE_READ_THRESHOLD: u8 = 10;
-const INACTIVE_SLEEP_MULTIPLIER: u64 = 2;
 
 /// Message with its source/destination IP address
 pub type MessageWithAddress<T> = (T, IpAddr);

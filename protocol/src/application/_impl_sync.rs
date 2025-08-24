@@ -171,6 +171,14 @@ impl ServiceApplication {
     /// * `event_id` - ID of the event to notify
     /// * `payload` - Event data to send to subscribers
     pub fn notify(&self, event_id: u16, payload: Vec<u8>) {
+        debug!("Notifying event {}", event_id);
+
+        // Check if the current service is running
+        if !self.server_running.load(Ordering::SeqCst) {
+            error!("Service application is not running");
+            return;
+        }
+
         let offered_events = self.offered_events.lock();
         if let Some(clients_to_notify) = offered_events.get(&event_id) {
             if clients_to_notify.is_empty() {
@@ -259,6 +267,12 @@ impl ServiceApplication {
         callback: MethodResponseCallback,
     ) {
         debug!("Calling method {} on service {}", method_id, service_id);
+
+        // Check if the current service is running
+        if !self.server_running.load(Ordering::SeqCst) {
+            error!("Service application is not running");
+            return;
+        }
 
         let ip_addr = match self.service_to_ip(service_id) {
             Some(addr) => addr,

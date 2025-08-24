@@ -143,14 +143,85 @@ impl ServiceDiscovery {
     }
 
     pub fn get_service_mapping(&self) -> Vec<(u16, IpAddr)> {
+        let mut services = Vec::new();
+        
+        // Add static services first
+        for (&service_id, &ip_addr) in &self.config.static_services {
+            services.push((service_id, ip_addr));
+        }
+        
+        // Add discovered services that don't conflict with static ones
         let registry = self.services_registry.lock();
-        registry.get_active_services()
+        let discovered_services = registry.get_active_services();
+        
+        for (service_id, ip_addr) in discovered_services {
+            // Only add if not already present as a static service
+            if !self.config.has_static_service(service_id) {
+                services.push((service_id, ip_addr));
+            }
+        }
+        
+        services
+    }
+
+    /// Add a static service mapping
+    /// 
+    /// Note: This should be called before `init()` or the service needs to be reinitialized
+    /// to take effect.
+    /// 
+    /// # Arguments
+    /// * `service_id` - The service ID to map
+    /// * `ip_addr` - The IP address for this service
+    pub fn add_static_service(&mut self, service_id: u16, ip_addr: IpAddr) {
+        self.config.add_static_service(service_id, ip_addr);
+        
+        // If already initialized, update the registry immediately
+        if self.socket.is_some() {
+            let mut registry = self.services_registry.lock();
+            if let Err(e) = registry.insert_static(service_id, ip_addr) {
+                error!("Failed to add static service {} -> {}: {}", service_id, ip_addr, e);
+            }
+        }
+    }
+
+    /// Remove a static service mapping
+    /// 
+    /// # Arguments
+    /// * `service_id` - The service ID to remove
+    pub fn remove_static_service(&mut self, service_id: u16) {
+        self.config.remove_static_service(service_id);
+        
+        // If already initialized, update the registry immediately
+        if self.socket.is_some() {
+            let mut registry = self.services_registry.lock();
+            registry.remove_static(service_id);
+        }
+    }
+
+    /// Get all static service mappings
+    /// 
+    /// # Returns
+    /// * Vector of (service_id, ip_addr) tuples for all static services
+    pub fn get_static_services(&self) -> Vec<(u16, IpAddr)> {
+        self.config.static_services.iter().map(|(&id, &ip)| (id, ip)).collect()
+    }
+
+    /// Check if a service ID has a static mapping
+    /// 
+    /// # Arguments
+    /// * `service_id` - The service ID to check
+    /// 
+    /// # Returns
+    /// * `true` if the service has a static mapping, `false` otherwise
+    pub fn has_static_service(&self, service_id: u16) -> bool {
+        self.config.has_static_service(service_id)
     }
 }
 
 /// Implement the ServiceDiscoveryInterface trait for ServiceDiscovery
 impl ServiceDiscoveryInterface for ServiceDiscovery {
     /// Initializes the UDP socket and joins the multicast group.
+    /// Also loads any configured static services into the registry.
     ///
     /// # Returns
     /// * `Ok(())` if initialization succeeded
@@ -171,6 +242,15 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
 
         let socket = Arc::new(socket);
         self.socket = Some(socket.clone());
+
+        // Load static services into the registry
+        if !self.config.static_services.is_empty() {
+            info!("Loading {} static services", self.config.static_services.len());
+            let mut registry = self.services_registry.lock();
+            if let Err(e) = registry.load_static_services(&self.config.static_services) {
+                error!("Failed to load some static services: {}", e);
+            }
+        }
 
         info!(
             "Service discovery initialized with ID: {} and socket: {:?}",
@@ -318,14 +398,22 @@ impl ServiceDiscoveryInterface for ServiceDiscovery {
     }
 
     /// Finds the IP address of a service by its ID.
+    /// 
+    /// Static services take precedence over discovered services.
     ///
     /// # Arguments
     /// * `service_id` - The ID of the service to find
     ///
     /// # Returns
-    /// * `Some(IpAddr)` if the service is found and not stale
-    /// * `None` if the service is not found or has expired
+    /// * `Some(IpAddr)` if the service is found (static or discovered)
+    /// * `None` if the service is not found
     fn find_service(&self, service_id: u16) -> Option<IpAddr> {
+        // First check static services
+        if let Some(static_ip) = self.config.get_static_service(service_id) {
+            return Some(static_ip);
+        }
+
+        // Then check discovered services
         // Clean up stale entries first
         self.cleanup_stale_services();
 

@@ -11,6 +11,7 @@ use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::{eventloop::EspSystemEventLoop, hal::prelude::Peripherals, ipv4};
 use protocol::application::_impl_sync::ServiceApplication;
 use protocol::sd::ServiceDiscovery;
+use log::info;
 
 // Turn signal states
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,6 +22,9 @@ enum SignalState {
     RightOn = 2,
     HazardOn = 3,
 }
+
+// Constants for SOMEIP communication
+const NOTIFICATION_EVENT_ID: u16 = 0x0002; // Event ID for turn signals notification
 
 fn main() -> Result<()> {
     // It is necessary to call this function once. Otherwise some patches to the runtime
@@ -60,8 +64,10 @@ fn main() -> Result<()> {
         &sys_loop,
     );
 
+    // Create the SOMEIP application
     let mut app = ServiceApplication::<ServiceDiscovery>::new(0x01);
 
+    // Initialize the application
     app.init()?;
 
     // LED pin setup - using GPIO 14 for left, GPIO 15 for right
@@ -78,9 +84,20 @@ fn main() -> Result<()> {
     let right_led_blink = right_led.clone();
     let signal_state_blink = signal_state.clone();
     
+    // Create shared state for LED status
+    let left_led_state = Arc::new(AtomicU8::new(0));   // 0 = off, 1 = on
+    let right_led_state = Arc::new(AtomicU8::new(0));  // 0 = off, 1 = on
+    
+    // Clone the state for the blinker thread
+    let left_led_state_blink = left_led_state.clone();
+    let right_led_state_blink = right_led_state.clone();
+    
     // Background thread that handles LED blinking based on current state
     thread::spawn(move || {
         let mut blink_on = false;
+        let mut prev_left_state = 0;
+        let mut prev_right_state = 0;
+        
         loop {
             let current_state = signal_state_blink.load(Ordering::Relaxed);
             
@@ -92,6 +109,17 @@ fn main() -> Result<()> {
                         let mut right = right_led_blink.lock().unwrap();
                         left.set_low().unwrap();
                         right.set_low().unwrap();
+                        
+                        // Update LED states if they changed
+                        if prev_left_state != 0 {
+                            left_led_state_blink.store(0, Ordering::Relaxed);
+                            prev_left_state = 0;
+                        }
+                        
+                        if prev_right_state != 0 {
+                            right_led_state_blink.store(0, Ordering::Relaxed);
+                            prev_right_state = 0;
+                        }
                     }
                     thread::sleep(Duration::from_millis(100));
                 }
@@ -100,10 +128,25 @@ fn main() -> Result<()> {
                         let mut left = left_led_blink.lock().unwrap();
                         let mut right = right_led_blink.lock().unwrap();
                         right.set_low().unwrap(); // Ensure right is off
+                        
+                        // Update right LED state if it changed
+                        if prev_right_state != 0 {
+                            right_led_state_blink.store(0, Ordering::Relaxed);
+                            prev_right_state = 0;
+                        }
+                        
+                        // Blink left LED
+                        let new_left_state = if blink_on { 1 } else { 0 };
                         if blink_on {
                             left.set_high().unwrap();
                         } else {
                             left.set_low().unwrap();
+                        }
+                        
+                        // If LED state changed, update
+                        if prev_left_state != new_left_state {
+                            left_led_state_blink.store(new_left_state, Ordering::Relaxed);
+                            prev_left_state = new_left_state;
                         }
                     }
                     thread::sleep(Duration::from_millis(500));
@@ -114,10 +157,25 @@ fn main() -> Result<()> {
                         let mut left = left_led_blink.lock().unwrap();
                         let mut right = right_led_blink.lock().unwrap();
                         left.set_low().unwrap(); // Ensure left is off
+                        
+                        // Update left LED state if it changed
+                        if prev_left_state != 0 {
+                            left_led_state_blink.store(0, Ordering::Relaxed);
+                            prev_left_state = 0;
+                        }
+                        
+                        // Blink right LED
+                        let new_right_state = if blink_on { 1 } else { 0 };
                         if blink_on {
                             right.set_high().unwrap();
                         } else {
                             right.set_low().unwrap();
+                        }
+                        
+                        // If LED state changed, update
+                        if prev_right_state != new_right_state {
+                            right_led_state_blink.store(new_right_state, Ordering::Relaxed);
+                            prev_right_state = new_right_state;
                         }
                     }
                     thread::sleep(Duration::from_millis(500));
@@ -127,12 +185,25 @@ fn main() -> Result<()> {
                     {
                         let mut left = left_led_blink.lock().unwrap();
                         let mut right = right_led_blink.lock().unwrap();
+                        
+                        // Blink both LEDs
+                        let new_state = if blink_on { 1 } else { 0 };
                         if blink_on {
                             left.set_high().unwrap();
                             right.set_high().unwrap();
                         } else {
                             left.set_low().unwrap();
                             right.set_low().unwrap();
+                        }
+                        
+                        // If LED states changed, update
+                        if prev_left_state != new_state {
+                            left_led_state_blink.store(new_state, Ordering::Relaxed);
+                            prev_left_state = new_state;
+                        }
+                        if prev_right_state != new_state {
+                            right_led_state_blink.store(new_state, Ordering::Relaxed);
+                            prev_right_state = new_state;
                         }
                     }
                     thread::sleep(Duration::from_millis(500));
@@ -146,8 +217,12 @@ fn main() -> Result<()> {
     });
 
     
+    // Register the notification event
+    app.offer_event(NOTIFICATION_EVENT_ID);
+    
     // Method 0x01: Left turn signal (toggle)
     let signal_state_left = signal_state.clone();
+    
     app.offer_method(
         0x01,  
         Arc::new(move |_payload | {
@@ -164,13 +239,20 @@ fn main() -> Result<()> {
                 }
             };
             
+            // Log state change
+            info!("Turn signals state change: From {} to {}", current_state, new_state);
+            
+            // Store the new state - LED state changes and notifications will be handled by other threads
             signal_state_left.store(new_state, Ordering::Relaxed);
+            
+            // Return acknowledgment of the command
             Ok(vec![new_state])
         }),
     );
 
     // Method 0x02: Right turn signal (toggle)
     let signal_state_right = signal_state.clone();
+    
     app.offer_method(
         0x02,
         Arc::new(move |_payload| {
@@ -187,13 +269,20 @@ fn main() -> Result<()> {
                 }
             };
             
+            // Log state change
+            info!("Turn signals state change: From {} to {}", current_state, new_state);
+            
+            // Store the new state - LED state changes and notifications will be handled by other threads
             signal_state_right.store(new_state, Ordering::Relaxed);
+            
+            // Return acknowledgment of the command
             Ok(vec![new_state])
         })
     );
 
     // Method 0x03: Hazard lights (toggle) - can only be turned off by calling 0x03 again
     let signal_state_hazard = signal_state.clone();
+    
     app.offer_method(
         0x03,
         Arc::new(move |_payload| {
@@ -210,12 +299,59 @@ fn main() -> Result<()> {
                 }
             };
             
+            // Log state change
+            info!("Turn signals state change: From {} to {}", current_state, new_state);
+            
+            // Store the new state - LED state changes and notifications will be handled by other threads
             signal_state_hazard.store(new_state, Ordering::Relaxed);
+            
+            // Return acknowledgment of the command
             Ok(vec![new_state])
         })
     );
     
     app.start(false)?;
+    
+    // Create a separate thread for notifications based on actual LED states
+    let notification_app = app;
+    let left_led_state_notify = left_led_state.clone();
+    let right_led_state_notify = right_led_state.clone();
+    let signal_state_notify = signal_state.clone();
+    
+    thread::spawn(move || {
+        // Keep track of last sent LED states to avoid duplicate notifications
+        let mut prev_left = 255; // Initialize to invalid value to ensure first notification
+        let mut prev_right = 255;
+        let mut prev_hazard = 255;
+        
+        loop {
+            // Read current LED states
+            let left_state = left_led_state_notify.load(Ordering::Relaxed);
+            let right_state = right_led_state_notify.load(Ordering::Relaxed);
+            
+            // Calculate current hazard state based on the signal state
+            let current_state = signal_state_notify.load(Ordering::Relaxed);
+            let hazard_state = if current_state == 3 { 1 } else { 0 };
+            
+            // Only send notification if any state changed
+            if left_state != prev_left || right_state != prev_right || hazard_state != prev_hazard {
+                info!("Sending LED states notification: left={}, hazard={}, right={}", 
+                      left_state, hazard_state, right_state);
+                
+                // Format for the frontend: [left_state, hazard_state, right_state]
+                let data = vec![left_state, hazard_state, right_state];
+                notification_app.notify(NOTIFICATION_EVENT_ID, data);
+                
+                // Update previous state
+                prev_left = left_state;
+                prev_right = right_state;
+                prev_hazard = hazard_state;
+            }
+            
+            // Check frequently to catch all state changes during blinking
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
 
     loop {
         thread::sleep(Duration::from_millis(500)); // Reduce frequency to prevent memory pressure

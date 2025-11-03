@@ -24,9 +24,9 @@ fn main() -> Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
 
     let ipv4_client_settings_home = ipv4::ClientSettings {
-        ip: Ipv4Addr::new(192, 168, 0, 6),
+        ip: Ipv4Addr::new(192, 168, 1, 6),
         subnet: ipv4::Subnet {
-            gateway: (Ipv4Addr::new(192, 168, 0, 1)),
+            gateway: (Ipv4Addr::new(192, 168, 1, 1)),
             mask: (ipv4::Mask(24)),
         },
         dns: None,
